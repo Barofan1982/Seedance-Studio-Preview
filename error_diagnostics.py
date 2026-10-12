@@ -115,7 +115,7 @@ def exception_diagnostics(error, operation='', *, secrets=()):
     return safe_value(diagnostics, secrets)
 
 
-def possible_causes(code='', message='', status=None, phase='', *, operation=''):
+def possible_causes(code='', message='', status=None, phase='', *, operation='', endpoint=''):
     value = f'{code} {message}'.lower()
     if 'request blocked' in value:
         return ['平台访问防护拦截了请求；可能涉及出口 IP、访问策略或风控，不足以判定为账号额度问题。携服务器事件编号联系平台支持；不要连续重试。']
@@ -151,6 +151,10 @@ def possible_causes(code='', message='', status=None, phase='', *, operation='')
         return ['连接、传输或服务端等待耗时超过本地上限；没有收到响应头时无法判定是网络还是中转处理。',
                 '创建请求可能已被接收，需维护人员核对；不能据此判断没有扣费。']
     if any(s in value for s in ('connection reset', 'remote end closed', 'connectionreset', 'remotedisconnected')):
+        if endpoint.startswith('https://api.openai.com/'):
+            return ['网络、代理或 OpenAI 服务提前关闭连接；没有收到响应头，不能确定由哪一端关闭。',
+                    '这条记录来自 AI 分析接口；核对代理线路及平台状态，与 Seedance 中转账号无关。',
+                    '分析端可能已接收请求；确认网络稳定后可手动重新优化，可能再次消耗平台额度。工具不会自动重发。']
         return ['网络、网关或服务端提前关闭连接；需按时间和请求编号核对中转日志。']
     if operation == 'download':
         return ['核对成片地址是否有效、下载网络、目标目录权限和磁盘空间；云端生成结果可能仍然存在。']
@@ -191,13 +195,16 @@ def call_details(call):
             'http_status': status, 'code': str(code or ''), 'message': str(message or ''),
             'diagnostics': diag, 'response': response, 'issue': call_issue(call),
             'causes': possible_causes(str(code or ''), str(message or '')+' '+str(diag.get('reason','')),
-                                     status, phase, operation=operation)}
+                                     status, phase, operation=operation, endpoint=diag.get('endpoint', ''))}
 
 
 def call_report(call):
     info = call_details(call)
     created = datetime.datetime.fromtimestamp(call.get('created_at') or 0, TZ).strftime('%Y-%m-%d %H:%M:%S +08:00')
     diag = info['diagnostics']
+    request = json_value(call.get('request_json'))
+    request = request if isinstance(request, dict) else {}
+    auth_mode = diag.get('auth_mode') or request.get('auth_mode')
     status = {'running':'进行中', 'succeeded':'调用已完成', 'failed':'调用失败', 'unknown':'提交未确认'}.get(call.get('status'), '未记录')
     if call.get('operation') == 'query' and info['response'].get('status') == 'failed':
         status = '查询已完成，云端生成失败'
@@ -211,6 +218,15 @@ def call_report(call):
              f"请求大小：{diag.get('request_body_bytes', '旧记录未保存')} 字节",
              f"服务器响应编号：{json.dumps(diag.get('response_ids') or {}, ensure_ascii=False)}",
              '', '接口或本地错误原文：', info['message'] or '本条调用没有报错。']
+    context = []
+    if auth_mode:
+        context.append('授权方式：' + {'chatgpt_plan':'ChatGPT 会员授权', 'api_key':'接口密钥（单独计费）'}.get(auth_mode, str(auth_mode)))
+    if diag.get('connection_route'):
+        context.append('网络路径：' + str(diag['connection_route']) +
+                       ('（' + str(diag['proxy_address']) + '）' if diag.get('proxy_address') else ''))
+    if 'input_image_count' in diag:
+        context.append(f"分析图片数：{diag['input_image_count']} 张（含抽帧与本地参考图）")
+    lines[7:7] = context
     if info['issue']:
         lines += ['', '可能原因（排查建议，尚未确认根因）：'] + ['• '+cause for cause in info['causes']]
     if call.get('status') == 'unknown':

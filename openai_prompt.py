@@ -9,6 +9,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -238,9 +239,26 @@ class OpenAIPromptClient:
     def _stream_response(self, request_body: dict, timeout: int = 300) -> dict:
         started = time.monotonic()
         phase, http_status, response_headers = 'opening_connection_or_sending_request', None, {}
+        data = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+        context = {
+            'request_body_bytes': len(data),
+            'input_image_count': sum(item.get('type') == 'input_image' for message in request_body.get('input', [])
+                                     if isinstance(message, dict) for item in message.get('content', [])
+                                     if isinstance(item, dict)),
+            'auth_mode': 'chatgpt_plan' if self.chatgpt_plan else 'api_key',
+        }
+        try:
+            proxy = urllib.request.getproxies().get('https', '')
+            using_proxy = bool(proxy) and not urllib.request.proxy_bypass(urlsplit(RESPONSES_URL).hostname)
+            context['connection_route'] = '系统代理' if using_proxy else '直连'
+            if using_proxy:
+                address = urlsplit(proxy if '://' in proxy else 'http://' + proxy)
+                context['proxy_address'] = f"{address.hostname}:{address.port}" if address.port else str(address.hostname)
+        except (OSError, ValueError):
+            context['connection_route'] = '未记录'
         request = urllib.request.Request(
             RESPONSES_URL,
-            data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+            data=data,
             method="POST",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -253,7 +271,7 @@ class OpenAIPromptClient:
                 try:
                     return _read_response_stream(response)
                 except OpenAIError as error:
-                    error.diagnostics = {**response_snapshot(b'',response.headers,response.status,secrets=(self.api_key,)),
+                    error.diagnostics = {**context, **response_snapshot(b'',response.headers,response.status,secrets=(self.api_key,)),
                                          **error.diagnostics, 'method':'POST', 'endpoint':RESPONSES_URL,
                                          'timeout_seconds':timeout, 'elapsed_ms':round((time.monotonic()-started)*1000)}
                     error.diagnostics['http_status'] = response.status
@@ -267,12 +285,12 @@ class OpenAIPromptClient:
                 detail = payload.get("error", {}).get("code") or payload.get("detail") or "请求失败"
             except (ValueError, AttributeError):
                 detail = "请求失败"
-            trace = {**response_snapshot(raw,error.headers,error.code,secrets=(self.api_key,)), 'phase':'http_response',
+            trace = {**context, **response_snapshot(raw,error.headers,error.code,secrets=(self.api_key,)), 'phase':'http_response',
                      'method':'POST', 'endpoint':RESPONSES_URL, 'timeout_seconds':timeout,
                      'elapsed_ms':round((time.monotonic()-started)*1000)}
             raise OpenAIError(safe_text(f"ChatGPT 计划返回 HTTP {error.code}：{str(detail)[:180]}",(self.api_key,)),diagnostics=trace) from None
         except (OSError, urllib.error.URLError) as error:
-            trace={'method':'POST','endpoint':RESPONSES_URL,'phase':phase,'http_status':http_status,
+            trace={**context, 'method':'POST','endpoint':RESPONSES_URL,'phase':phase,'http_status':http_status,
                    'response_ids':response_snapshot(b'',response_headers,http_status)['response_ids'],
                    'timeout_seconds':timeout,'elapsed_ms':round((time.monotonic()-started)*1000),
                    'reason':safe_text(error,(self.api_key,)),'error_type':type(error).__name__}
