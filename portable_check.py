@@ -18,6 +18,16 @@ def main():
             home = Path(folder)
             os.environ['APPDATA'] = str(home / 'profile')
             os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+            # Exercise frozen path resolution without touching the distribution.
+            from app_paths import data_directory, output_directory
+            actual_executable = sys.executable
+            report['checks']['portable_paths'] = (
+                data_directory() == Path(actual_executable).resolve().parent / 'data'
+                and output_directory() == Path(actual_executable).resolve().parent / '成片')
+            sys.executable = str(home / 'Seedance Studio.exe')
+            import app_paths
+            app_paths.APP_DIR = data_directory()
+            app_paths.DEFAULT_OUTPUT_DIR = output_directory()
             from PySide6.QtCore import QLibraryInfo, QUrl
             from PySide6.QtGui import QFont, QImage
             from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
@@ -70,5 +80,33 @@ def main():
         report['success'] = False
         report['error'] = traceback.format_exc()
     output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    return 0 if report['success'] else 1
+
+
+def startup_check():
+    """Run the real startup in a separately copied bundle, with no network jobs."""
+    output = Path(sys.argv[sys.argv.index('--startup-check') + 1]).resolve()
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR
+    from secure_store import KEY_FILE, load_protected_json
+    from chatgpt_auth import AUTH_FILE
+    from history_store import HISTORY_FILE
+    from app import main
+    report = {'frozen': bool(getattr(sys, 'frozen', False))}
+    result = main(start_services=False, quit_after_ms=500)
+    state = json.loads((APP_DIR / 'state.json').read_text(encoding='utf-8')) if result == 0 else {}
+    report['checks'] = {
+        'normal_startup': result == 0,
+        'exe_relative_data': APP_DIR == Path(sys.executable).resolve().parent / 'data',
+        'all_profile_paths': KEY_FILE.parent == AUTH_FILE.parent == HISTORY_FILE.parent == APP_DIR,
+        'auto_created_history': HISTORY_FILE.is_file(),
+        'auto_created_log': (APP_DIR / 'logs' / 'error.log').is_file(),
+        'exe_relative_output': state.get('download_dir') == str(DEFAULT_OUTPUT_DIR),
+        'no_bundled_credentials': not load_protected_json(AUTH_FILE).get('accounts') and not any(
+            (APP_DIR / name).exists() for name in (
+                'api_key.bin', 'openai_api_key.bin', 'deepseek_api_key.bin', 'video_upload_account.bin')),
+    }
+    report['success'] = report['frozen'] and all(report['checks'].values())
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     return 0 if report['success'] else 1

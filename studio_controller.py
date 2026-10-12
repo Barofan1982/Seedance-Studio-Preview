@@ -32,7 +32,7 @@ from upload_library import UploadLibrary, record_status, local_copy
 from image_library import ImageLibrary, image_copy, image_status
 from generation_queue import GenerationQueue, ACTIVE as QUEUE_ACTIVE
 
-APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "SeedanceVideoStudioPreview"
+from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
 MODES = {"全模态参考": "reference", "首帧图片": "first_frame", "首尾帧图片": "first_last_frame", "纯文本": "text"}
 TASK_TYPES = {"参考生视频": "reference"}
 PURPOSE = {"competitor": "视频", "character": "角色", "scene": "场景", "first": "首帧", "last": "尾帧", "audio": "音频", "other": "参考", "keyframe": "关键帧"}
@@ -40,7 +40,7 @@ DEFAULTS = {
     "base_url": DEFAULT_BASE_URL, "mode": "全模态参考", "task_type": "参考生视频",
     "resolution": "720p", "duration": "5", "ratio": "16:9", "generate_audio": True,
     "watermark": False, "return_last_frame": False, "output_format": "mp4",
-    "download_dir": str(Path.home() / "Downloads" / "Seedance Studio"), "openai_model": DEFAULT_MODEL,
+    "download_dir": str(DEFAULT_OUTPUT_DIR), "openai_model": DEFAULT_MODEL,
     "ai_provider": "chatgpt", "ai_models": {},
     "transcribe_audio": False, "manual_prompt": False, "auto_analyze": False, "allow_http_for": "",
     "brief": "", "ai_original_text": "",
@@ -385,8 +385,11 @@ class StudioController(QObject):
         self.schedule_queue()
 
     def write_error(self, text):
+        output, _path = open_error_log(self.directory)
+        if output is None:
+            return
         try:
-            with (self.directory / "error.log").open("a", encoding="utf-8") as output:
+            with output:
                 output.write(str(compact_record(text, (self.api_key, self.openai_key))) + "\n")
         except OSError:
             pass

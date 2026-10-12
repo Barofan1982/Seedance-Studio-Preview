@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from secure_store import load_protected_json, save_protected_json
 
 
-APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "SeedanceVideoStudioPreview"
+from app_paths import APP_DIR
 AUTH_FILE = APP_DIR / "chatgpt_accounts.bin"
 AUTHORIZE_URL = "https://auth.openai.com/api/accounts/authorize"
 TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"

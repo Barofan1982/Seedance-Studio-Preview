@@ -9,7 +9,9 @@ from ctypes import wintypes
 from pathlib import Path
 
 
-KEY_FILE = Path(os.environ.get("APPDATA", Path.home())) / "SeedanceVideoStudioPreview" / "api_key.bin"
+from app_paths import APP_DIR
+
+KEY_FILE = APP_DIR / "api_key.bin"
 OPENAI_KEY_FILE = KEY_FILE.with_name("openai_api_key.bin")
 
 

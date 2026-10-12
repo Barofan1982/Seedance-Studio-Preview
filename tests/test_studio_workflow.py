@@ -136,8 +136,8 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertNotIn("dummy-key", json.dumps(self.controller.history.calls()))
         diagnostics = json.loads(self.controller.history.calls()[0]["response_json"])["network_diagnostics"]
         self.assertEqual(diagnostics["errno"], 10054)
-        self.assertIn("网络诊断", (self.directory / "error.log").read_text(encoding="utf-8"))
-        self.assertNotIn("dummy-key", (self.directory / "error.log").read_text(encoding="utf-8"))
+        self.assertIn("网络诊断", (self.directory / "logs" / "error.log").read_text(encoding="utf-8"))
+        self.assertNotIn("dummy-key", (self.directory / "logs" / "error.log").read_text(encoding="utf-8"))
         self.assertTrue(self.errors)
         window = self.make_window()
         self.assertTrue(window.submission_notice.isVisible())

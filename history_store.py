@@ -13,7 +13,9 @@ from seedance_client import estimated_cost_usd
 from request_records import compact_record
 
 
-HISTORY_FILE = Path(os.environ.get("APPDATA", Path.home())) / "SeedanceVideoStudioPreview" / "history.sqlite3"
+from app_paths import APP_DIR
+
+HISTORY_FILE = APP_DIR / "history.sqlite3"
 
 
 class HistoryStore:

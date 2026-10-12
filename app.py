@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from media_assets import IMAGE_EXTENSIONS
 from request_records import compact_record
 from secure_store import save_key, save_openai_key
+from app_paths import TECHNICAL_CONTACT, open_error_log
 from seedance_client import RATIOS, RESOLUTIONS, CREATE_TIMEOUT_SECONDS
 from studio_controller import APP_DIR, MODES, TASK_TYPES, PURPOSE, StudioController, collect_payload, generation_settings, manifest, structured_prompt, neutral_video_text, prompt_for_submission, review_summary
 from studio_theme import STYLE, TOOLTIP_STYLE, icon
@@ -60,6 +61,7 @@ class UploadLoginDialog(QDialog):
         layout.setContentsMargins(28,24,28,24)
         layout.addWidget(label('连接视频上传', 'Title'))
         layout.addWidget(label('使用中转账号上传本地视频，自动获取参考地址。','Muted',True))
+        layout.addWidget(label(TECHNICAL_CONTACT, 'Muted', True))
         self.username = QLineEdit(controller.upload_auth.account().get('username',''))
         self.username.setPlaceholderText('中转账号 / 手机号码')
         self.password = QLineEdit()
@@ -125,6 +127,7 @@ class SettingsDialog(QDialog):
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("已加密保存；留空保留当前密钥" if controller.api_key else "填写 Seedance 接口密钥")
         form.addRow("Seedance 密钥", self.key)
+        form.addRow("技术支持", label(TECHNICAL_CONTACT, 'Muted', True))
         platform_row = QWidget()
         platform_layout = QHBoxLayout(platform_row)
         platform_layout.setContentsMargins(0,0,0,0)
@@ -1430,36 +1433,53 @@ class StudioWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def main(*, login_platform=None):
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    error_log = (APP_DIR / "error.log").open("a", encoding="utf-8")
-    faulthandler.enable(error_log)
-    application = QApplication(sys.argv)
+def main(*, login_platform=None, start_services=True, quit_after_ms=None):
+    application = QApplication.instance() or QApplication(sys.argv)
     install_chinese_translation(application)
     application.setApplicationName("Seedance Studio")
     application.setStyle("Fusion")
     # Tooltips are separate windows and must also receive the application style.
     application.setStyleSheet(TOOLTIP_STYLE)
     application.setFont(QFont("Microsoft YaHei UI", 10))
+    error_log, log_path = None, None
+    controller = None
     try:
-        controller = StudioController() if login_platform in PLATFORMS else None
-        if controller:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        error_log, log_path = open_error_log(APP_DIR)
+        if error_log:
+            faulthandler.enable(error_log)
+        controller = StudioController()
+        if login_platform in PLATFORMS:
             controller.state['ai_provider'] = login_platform
-        window = StudioWindow(controller)
+        window = StudioWindow(controller, start_services=start_services)
         window.show()
         window.fit_to_screen()
-        if controller:
+        if login_platform in PLATFORMS:
             dialog = PlatformLoginDialog(controller, window)
             window.show_dialog(dialog)
             dialog.login()
+        if quit_after_ms is not None:
+            # Used by offline distribution checks; normal launches have no timer.
+            QTimer.singleShot(quit_after_ms, window.close)
         result = application.exec()
-    except Exception:
-        error_log.write(compact_record(traceback.format_exc()) + "\n")
-        error_log.flush()
-        QMessageBox.critical(None, "工作室启动失败", f"详细记录：{APP_DIR / 'error.log'}")
-        raise
+    except Exception as error:
+        if error_log:
+            try:
+                error_log.write(str(compact_record(traceback.format_exc())) + "\n")
+                error_log.flush()
+            except OSError:
+                pass
+        message = f"无法启动：{error}\n\n数据目录：{APP_DIR}"
+        if isinstance(error, PermissionError):
+            message += "\n请将整个便携版文件夹移到可写入的目录，例如桌面，再重新打开。"
+        if log_path:
+            message += f"\n诊断日志：{log_path}"
+        QMessageBox.critical(None, "工作室启动失败", message)
+        result = 1
     finally:
-        error_log.close()
+        if error_log:
+            faulthandler.disable()
+            error_log.close()
     return result
 
 
