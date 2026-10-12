@@ -16,6 +16,7 @@ from pathlib import Path
 
 from media_assets import MediaAsset, _run_media_tool, extract_audio, sample_video_frames
 from error_diagnostics import MAX_ERROR_BYTES, response_snapshot, safe_text
+from reasoning_settings import EFFORT_LABELS
 
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -175,10 +176,14 @@ class OpenAIPromptClient:
     def __init__(
         self, api_key: str, model: str = DEFAULT_MODEL, *,
         chatgpt_plan: bool = False, transcription_api_key: str = "",
+        reasoning_effort: str | None = None,
     ):
         self.api_key = api_key.strip()
         self.model = model.strip()
         self.chatgpt_plan = chatgpt_plan
+        if reasoning_effort is not None and reasoning_effort not in EFFORT_LABELS:
+            raise ValueError('不支持的思考强度。')
+        self.reasoning_effort = reasoning_effort
         self.transcription_api_key = (transcription_api_key or (api_key if not chatgpt_plan else "")).strip()
         if not self.api_key:
             raise ValueError("请先登录 ChatGPT。" if chatgpt_plan else "请填写 OpenAI 接口密钥。")
@@ -246,6 +251,7 @@ class OpenAIPromptClient:
                                      if isinstance(message, dict) for item in message.get('content', [])
                                      if isinstance(item, dict)),
             'auth_mode': 'chatgpt_plan' if self.chatgpt_plan else 'api_key',
+            'reasoning_effort': (request_body.get('reasoning') or {}).get('effort'),
         }
         try:
             proxy = urllib.request.getproxies().get('https', '')
@@ -477,6 +483,8 @@ class OpenAIPromptClient:
                 "input": [{"role": "user", "content": content}],
                 "text": {"format": {"type": "json_schema", "name": "seedance_reverse_prompt", "strict": True, "schema": _SCHEMA}},
             }
+            if self.reasoning_effort is not None:
+                request['reasoning'] = {'effort': self.reasoning_effort}
             if self.chatgpt_plan:
                 request["stream"] = True
                 report("素材已准备好，正在等待 AI 分析并编写提示词…")

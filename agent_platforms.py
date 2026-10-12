@@ -11,6 +11,7 @@ from pathlib import Path
 
 from error_diagnostics import response_snapshot, safe_text
 from secure_store import load_protected_json, save_protected_json
+from reasoning_settings import deepseek_reasoning
 
 PLATFORMS = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek"}
 INFERENCE_ORIGIN = "https://api.deepseek.com"
@@ -189,6 +190,10 @@ class DeepSeekApiSession:
         system = request['instructions'] + '\n只输出符合以下结构的 JSON，不加说明或代码围栏：\n' + json.dumps(schema, ensure_ascii=False)
         body = {'model': model, 'stream': False, 'max_tokens': 8000, 'response_format': {'type': 'json_object'},
                 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': content}]}
+        try:
+            body.update(deepseek_reasoning((request.get('reasoning') or {}).get('effort', 'high')))
+        except ValueError as error:
+            raise PlatformError(str(error)) from None
         if len(json.dumps(body, ensure_ascii=False).encode('utf-8')) > 48 * 1024 * 1024:
             raise PlatformError('分析请求超过 48 MiB，请减少参考图片或抽帧数量。')
         try:

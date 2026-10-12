@@ -176,7 +176,7 @@ class StudioWorkflowTests(unittest.TestCase):
             factory.return_value.draft.return_value = draft
             self.controller.analyze()
             self.pump_until(lambda: not self.controller.busy)
-            factory.assert_called_once_with("dummy-plan-token", "test-model", chatgpt_plan=True, transcription_api_key="")
+            factory.assert_called_once_with("dummy-plan-token", "test-model", chatgpt_plan=True, transcription_api_key="", reasoning_effort=None)
             args, kwargs = factory.return_value.draft.call_args
             self.assertEqual(args[0].path, competitor_path)
             self.assertEqual(kwargs["generated_video"], output_path)

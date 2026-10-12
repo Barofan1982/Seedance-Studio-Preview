@@ -227,7 +227,7 @@ class PlatformUiTests(unittest.TestCase):
             with patch('studio_controller.AgentPromptClient') as factory,patch('studio_controller.OpenAIPromptClient') as paid:
                 factory.return_value.draft.return_value=PromptDraft('简短核对',[],'优化后的要求',[])
                 controller.analyze();pump()
-                factory.assert_called_once_with(session,'deepseek-flash',transcription_api_key='')
+                factory.assert_called_once_with(session,'deepseek-flash',transcription_api_key='',reasoning_effort='high')
                 paid.assert_not_called()
                 self.assertEqual(controller.state['prompt'],'优化后的要求')
                 request=json.loads(controller.history.calls()[0]['request_json'])

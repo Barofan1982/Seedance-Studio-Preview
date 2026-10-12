@@ -3,6 +3,7 @@ from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QVBoxLayout, QLineEdit
 from agent_platforms import PLATFORMS
 from studio_widgets import StudioComboBox, button, card, label
+from reasoning_settings import EFFORT_LABELS
 
 FEES = {
     'chatgpt': '使用 ChatGPT 计划额度。',
@@ -17,8 +18,8 @@ class PlatformLoginDialog(QDialog):
         self.login_pending = False
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle('分析平台 · 连接设置')
-        self.resize(650, 520)
-        self.setMinimumSize(550, 480)
+        self.resize(650, 560)
+        self.setMinimumSize(550, 520)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 22)
         layout.setSpacing(18)
@@ -42,6 +43,8 @@ class PlatformLoginDialog(QDialog):
         form.addRow('接口密钥', self.api_key)
         self.model = StudioComboBox()
         form.addRow('分析模型', self.model)
+        self.reasoning = StudioComboBox()
+        form.addRow('思考强度', self.reasoning)
         self.fees = label('', 'Muted', True)
         form.addRow('额度来源', self.fees)
         layout.addWidget(panel)
@@ -63,6 +66,7 @@ class PlatformLoginDialog(QDialog):
         layout.addLayout(actions)
         self.provider.currentIndexChanged.connect(self.select_provider)
         self.model.currentIndexChanged.connect(self.select_model)
+        self.reasoning.currentIndexChanged.connect(self.select_reasoning)
         controller.changed.connect(self.updated)
         controller.busy_changed.connect(self.busy_changed)
         controller.status_changed.connect(self.status_changed)
@@ -79,8 +83,29 @@ class PlatformLoginDialog(QDialog):
         if model and not self.controller.busy:
             self.controller.set_analysis_model(model)
             self.controller.save()
+            self.refresh_reasoning()
+
+    def select_reasoning(self):
+        value = self.reasoning.currentData()
+        if value is not None and not self.controller.busy:
+            self.controller.set_analysis_reasoning_effort(value)
+
+    def refresh_reasoning(self):
+        options = self.controller.reasoning_options()
+        with QSignalBlocker(self.reasoning):
+            self.reasoning.clear()
+            for effort in options:
+                self.reasoning.addItem(EFFORT_LABELS[effort], effort)
+            if options:
+                self.reasoning.setCurrentIndex(self.reasoning.findData(self.controller.analysis_reasoning_effort()))
+            else:
+                self.reasoning.addItem('高 · 等待模型信息' if not self.controller.models else '模型默认（未提供可调档位）')
+        self.reasoning.setEnabled(bool(options) and not self.controller.busy)
 
     def updated(self, category):
+        if category == 'ai_preferences':
+            self.refresh_reasoning()
+            return
         if category in {'models', 'account'}:
             if category == 'models' and self.controller.state['ai_provider'] == 'deepseek' and self.controller.analysis_account():
                 self.api_key.clear()
@@ -120,6 +145,7 @@ class PlatformLoginDialog(QDialog):
                             '密钥在本机加密保存；模型校验不调用推理。只有分析或优化提示词才产生 API 用量。' if is_api else '')
         self.provider.setEnabled(not controller.busy)
         self.model.setEnabled(bool(controller.models) and not controller.busy)
+        self.refresh_reasoning()
         self.refresh_button.setEnabled(active and not controller.busy)
         self.logout.setVisible(is_api); self.logout.setText('清除密钥')
         self.logout.setEnabled(active and not controller.busy)

@@ -9,6 +9,9 @@ from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
 CHOICE_NAMES = {'adaptive': '自适应', 'mp4': 'MP4', 'mov': 'MOV'}
 
 FIELD_NAMES = {
+    'reasoning':'思考配置', 'effort':'思考强度', 'reasoning_effort':'思考强度',
+    'ai_reasoning_effort':'分析思考强度', 'ai_reasoning_efforts':'各模型思考强度', 'thinking':'思考模式',
+    'connection_route':'网络路径', 'proxy_address':'代理地址', 'input_image_count':'分析图片数量',
     'request':'提交请求', 'payload':'请求正文', 'model':'模型', 'content':'输入内容',
     'type':'内容类型', 'text':'文字', 'image_url':'图片链接', 'video_url':'视频链接', 'audio_url':'音频链接',
     'url':'网址', 'role':'素材用途', 'resolution':'分辨率', 'ratio':'画面比例', 'duration':'时长（秒）',
@@ -89,6 +92,9 @@ def parameter_value(value, key=''):
     if key in {'duration', 'requested_duration'} and value in {-1, '-1'}:
         return '自适应'
     text = str(value)
+    if key in {'effort', 'reasoning_effort', 'ai_reasoning_effort'}:
+        from reasoning_settings import EFFORT_LABELS
+        return EFFORT_LABELS.get(text, text)
     if key == 'billing_source':
         return text.replace('OpenAI API 单独计费', 'OpenAI 接口单独计费')
     if key in {'error', 'reason'} and text:

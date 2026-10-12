@@ -5,11 +5,12 @@ from agent_platforms import PlatformError
 
 
 class AgentPromptClient(OpenAIPromptClient):
-    def __init__(self, session, model, *, transcription_api_key=""):
+    def __init__(self, session, model, *, transcription_api_key="", reasoning_effort='high'):
         self.session, self.model = session, model
         self.chatgpt_plan = False
         self.api_key = ""
         self.transcription_api_key = transcription_api_key
+        self.reasoning_effort = reasoning_effort
 
     def _post(self, url, data, content_type, timeout=180, credential=None):
         if url == RESPONSES_URL:

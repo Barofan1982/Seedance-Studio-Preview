@@ -20,6 +20,7 @@ from media_assets import IMAGE_EXTENSIONS
 from request_records import compact_record
 from secure_store import save_key, save_openai_key
 from app_paths import TECHNICAL_CONTACT, open_error_log
+from reasoning_settings import EFFORT_LABELS
 from seedance_client import RATIOS, RESOLUTIONS, CREATE_TIMEOUT_SECONDS
 from studio_controller import APP_DIR, MODES, TASK_TYPES, PURPOSE, StudioController, collect_payload, generation_settings, manifest, structured_prompt, neutral_video_text, prompt_for_submission, review_summary
 from studio_theme import STYLE, TOOLTIP_STYLE, icon
@@ -144,6 +145,9 @@ class SettingsDialog(QDialog):
         refresh.setToolTip("刷新当前分析账号的模型")
         model_layout.addWidget(refresh)
         form.addRow("分析模型", model_row)
+        self.reasoning = StudioComboBox()
+        form.addRow('思考强度', self.reasoning)
+        self.model.currentIndexChanged.connect(self.populate_reasoning)
         self.populate_models()
         controller.changed.connect(self.updated)
         self.openai_key = QLineEdit()
@@ -197,17 +201,34 @@ class SettingsDialog(QDialog):
         layout.addLayout(tools)
 
     def populate_models(self):
-        self.model.clear()
-        for item in self.controller.models:
-            self.model.addItem(item.get("display_name") or item["slug"], item["slug"])
-        selected = self.model.findData(self.controller.analysis_model())
-        if selected >= 0:
-            self.model.setCurrentIndex(selected)
+        with QSignalBlocker(self.model):
+            self.model.clear()
+            for item in self.controller.models:
+                self.model.addItem(item.get("display_name") or item["slug"], item["slug"])
+            selected = self.model.findData(self.controller.analysis_model())
+            if selected >= 0:
+                self.model.setCurrentIndex(selected)
         self.model.setEnabled(bool(self.controller.models))
         if not self.controller.models:
             self.model.addItem("连接分析平台后获取模型")
+        self.populate_reasoning()
+
+    def populate_reasoning(self):
+        model = self.model.currentData()
+        options = self.controller.reasoning_options(model) if model else []
+        with QSignalBlocker(self.reasoning):
+            self.reasoning.clear()
+            for effort in options:
+                self.reasoning.addItem(EFFORT_LABELS[effort], effort)
+            if options:
+                self.reasoning.setCurrentIndex(self.reasoning.findData(self.controller.analysis_reasoning_effort(model)))
+            else:
+                self.reasoning.addItem('高 · 等待模型信息' if not self.controller.models else '模型默认（未提供可调档位）')
+        self.reasoning.setEnabled(bool(options) and not self.controller.busy)
 
     def updated(self, category):
+        if category == 'ai_preferences':
+            self.populate_reasoning()
         if category in {"models", "account"}:
             self.platform_label.setText(PLATFORMS[self.controller.state['ai_provider']])
             self.populate_models()
@@ -252,6 +273,8 @@ class SettingsDialog(QDialog):
                                 allow_http_for=address if self.http.isChecked() else "")
         if self.model.currentData():
             controller.set_analysis_model(self.model.currentData())
+        if self.reasoning.currentData() is not None:
+            controller.set_analysis_reasoning_effort(self.reasoning.currentData())
         controller.save()
         controller.changed.emit("parameters")
         self.accept()

@@ -219,6 +219,10 @@ def call_report(call):
              f"服务器响应编号：{json.dumps(diag.get('response_ids') or {}, ensure_ascii=False)}",
              '', '接口或本地错误原文：', info['message'] or '本条调用没有报错。']
     context = []
+    effort = diag.get('reasoning_effort', request.get('reasoning_effort'))
+    if effort is not None:
+        from reasoning_settings import EFFORT_LABELS
+        context.append('思考强度：' + EFFORT_LABELS.get(effort, str(effort)))
     if auth_mode:
         context.append('授权方式：' + {'chatgpt_plan':'ChatGPT 会员授权', 'api_key':'接口密钥（单独计费）'}.get(auth_mode, str(auth_mode)))
     if diag.get('connection_route'):

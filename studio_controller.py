@@ -31,6 +31,7 @@ from video_upload import UploadSession, needs_upload, source_expired
 from upload_library import UploadLibrary, record_status, local_copy
 from image_library import ImageLibrary, image_copy, image_status
 from generation_queue import GenerationQueue, ACTIVE as QUEUE_ACTIVE
+from reasoning_settings import EFFORT_LABELS, supported_efforts, selected_effort
 
 from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
 MODES = {"全模态参考": "reference", "首帧图片": "first_frame", "首尾帧图片": "first_last_frame", "纯文本": "text"}
@@ -41,7 +42,7 @@ DEFAULTS = {
     "resolution": "720p", "duration": "5", "ratio": "16:9", "generate_audio": True,
     "watermark": False, "return_last_frame": False, "output_format": "mp4",
     "download_dir": str(DEFAULT_OUTPUT_DIR), "openai_model": DEFAULT_MODEL,
-    "ai_provider": "chatgpt", "ai_models": {},
+    "ai_provider": "chatgpt", "ai_models": {}, "ai_reasoning_efforts": {},
     "transcribe_audio": False, "manual_prompt": False, "auto_analyze": False, "allow_http_for": "",
     "brief": "", "ai_original_text": "",
     "prompt": "", "analysis": "", "prompt_draft": {}, "task_id": "",
@@ -192,6 +193,12 @@ class StudioController(QObject):
         self.state = {**DEFAULTS, **saved}
         self.state['ai_models'] = deepcopy({provider: model for provider, model in (saved.get('ai_models') or {}).items()
                                            if provider in PLATFORMS and provider != 'chatgpt'})
+        preferences = saved.get('ai_reasoning_efforts') or {}
+        self.state['ai_reasoning_efforts'] = {
+            provider: {model: effort for model, effort in values.items()
+                       if isinstance(model, str) and isinstance(effort, str) and effort in EFFORT_LABELS}
+            for provider, values in (preferences.items() if isinstance(preferences, dict) else [])
+            if provider in PLATFORMS and isinstance(values, dict)}
         if self.state['ai_provider'] not in PLATFORMS:
             self.state['ai_provider'] = 'chatgpt'
         self.state["task_type"] = "参考生视频"
@@ -788,6 +795,26 @@ class StudioController(QObject):
         else:
             self.state['ai_models'][self.state['ai_provider']] = model
 
+    def reasoning_model(self, model=None):
+        return next((item for item in self.models if item.get('slug') == (model or self.analysis_model())), {})
+
+    def reasoning_options(self, model=None):
+        return supported_efforts(self.state['ai_provider'], self.reasoning_model(model))
+
+    def analysis_reasoning_effort(self, model=None):
+        provider, slug = self.state['ai_provider'], model or self.analysis_model()
+        saved = self.state['ai_reasoning_efforts'].get(provider, {}).get(slug)
+        return selected_effort(provider, self.reasoning_model(slug), saved)
+
+    def set_analysis_reasoning_effort(self, effort):
+        if self.busy:
+            return
+        if effort not in self.reasoning_options():
+            raise ValueError('当前模型不支持该思考强度，请刷新模型后重新选择。')
+        self.state['ai_reasoning_efforts'].setdefault(self.state['ai_provider'], {})[self.analysis_model()] = effort
+        self.save()
+        self.changed.emit('ai_preferences')
+
     def select_ai_provider(self, provider):
         if self.busy or provider not in PLATFORMS or provider == self.state['ai_provider']:
             return
@@ -876,6 +903,7 @@ class StudioController(QObject):
         model = self.analysis_model()
         if model not in {m["slug"] for m in self.models}:
             raise ValueError("账号模型列表尚未就绪，请在设置中刷新模型。")
+        effort = self.analysis_reasoning_effort()
         assets = [replace(a) for a in analysis_assets(self.assets)]
         selected_model = next(m for m in self.models if m['slug'] == model)
         if provider != 'chatgpt' and selected_model.get('vision') is not True and any(a.kind in {'video','image'} for a in assets):
@@ -902,8 +930,10 @@ class StudioController(QObject):
 
         def action():
             catalog = frame_catalog(reference_videos(assets), assets, self.directory / "reference_frames", self._progress.emit)
-            client = (OpenAIPromptClient(self.auth.access_token(), model, chatgpt_plan=True, transcription_api_key=transcription_key)
-                      if provider == 'chatgpt' else AgentPromptClient(self.platform_accounts.sessions[provider], model, transcription_api_key=transcription_key))
+            client = (OpenAIPromptClient(self.auth.access_token(), model, chatgpt_plan=True, transcription_api_key=transcription_key,
+                                        reasoning_effort=effort)
+                      if provider == 'chatgpt' else AgentPromptClient(self.platform_accounts.sessions[provider], model,
+                                                                    transcription_api_key=transcription_key, reasoning_effort=effort))
             draft = client.draft(competitor, assets, brief, transcribe_audio=transcribe, generation_settings=settings,
                                  generated_video=generated, previous_prompt=previous, on_progress=self._progress.emit,
                                  reference_frames=catalog)
@@ -923,6 +953,7 @@ class StudioController(QObject):
             data["frame_count"] = len(result["frames"])
             data['ai_provider'] = provider
             data['ai_model'] = model
+            data['ai_reasoning_effort'] = effort
             data['ai_usage'] = result.get('ai_usage', {})
             self.state["prompt_draft"] = data
             self.state["manual_prompt"] = False
@@ -942,7 +973,8 @@ class StudioController(QObject):
 
         self.set_status("正在智能分析素材…" if not generated else "正在智能对比参考视频与成片…")
         self.start_job("refine" if generated else "draft", {
-            "model": model, "provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'api_key',
+            "model": model, "provider":provider, "reasoning_effort": effort,
+            "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'api_key',
             "billing_source": "ChatGPT 会员额度" if provider == 'chatgpt' else 'DeepSeek API 余额（接口单独计费）',
             "audio_transcription": {"enabled": transcribe, "billing_source": "OpenAI 接口单独计费" if transcribe else "未启用"},
             "generation_settings": settings, "creative_brief": brief, "assets": manifest(assets),

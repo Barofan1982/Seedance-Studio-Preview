@@ -119,3 +119,11 @@ EXE 位于 `dist/Seedance Studio/Seedance Studio.exe`，可分发 ZIP 位于 `di
 - ChatGPT 分析失败时补齐请求字节数、图片数量、授权方式和实际采用的代理路径；代理地址只保留主机与端口，不记录代理账号密码。
 - 调用记录区分 ChatGPT 会员授权与接口密钥。OpenAI 接口断连的排查说明指向网络、代理及 OpenAI 服务，不再误导为检查 Seedance 中转日志。
 - 没有收到响应头时继续保留未知 HTTP 状态，不推断为超时、鉴权失败或额度不足；不自动重发推理请求。
+
+## 2026-10-12 可调思考强度
+
+- “分析平台 · 连接设置”和“工作室设置”在模型下面提供“思考强度”，默认选择“高”，按平台与模型分别记住手动选择。
+- ChatGPT 使用账号模型列表返回的可用档位，提交 `reasoning.effort`；缺少档位信息的模型使用模型默认值并禁用强度选择，避免提交不兼容参数。模型不支持“高”时使用其支持的默认档位。
+- DeepSeek 提供关闭思考、低、高、最高；关闭时提交 `thinking.type=disabled`，其他档位提交 `thinking.type=enabled` 和 `reasoning_effort`。
+- 分析时固定本次选择，处理期间禁止更改；调用记录与提示词方案保存实际使用的强度，中文预览显示中文名称。
+- 参数依据：[OpenAI 思考参数](https://developers.openai.com/api/docs/guides/reasoning)、[DeepSeek 思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。
