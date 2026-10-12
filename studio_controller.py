@@ -802,7 +802,14 @@ class StudioController(QObject):
             return
         provider = self.state['ai_provider']
         session = self.auth if provider == 'chatgpt' else self.platform_accounts.sessions[provider]
-        def received(models):
+        def action():
+            models = session.models()
+            if provider == 'deepseek':
+                return {'models': models, 'account_warning': session.profile_warning,
+                        'profile_diagnostics': session.profile_diagnostics}
+            return models
+        def received(result):
+            models = result['models'] if provider == 'deepseek' else result
             self.models = models
             self.model_cache[provider] = models
             if models and self.analysis_model() not in {m["slug"] for m in models}:
@@ -810,9 +817,9 @@ class StudioController(QObject):
                 self.save()
             self.changed.emit("models")
             self.changed.emit("account")
-            self.set_status("准备就绪")
+            self.set_status(session.profile_warning if provider == 'deepseek' and session.profile_warning else "准备就绪")
         self.set_status(f"正在连接 {PLATFORMS[provider]}…")
-        self.start_job("models", {"provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account'}, session.models, received,
+        self.start_job("models", {"provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account'}, action, received,
                        failure=lambda error: self._analysis_error(error))
 
     def sign_in(self):
@@ -823,7 +830,11 @@ class StudioController(QObject):
         def action():
             label = session.sign_in() if provider == 'chatgpt' else session.sign_in(progress=self._progress.emit)
             self._progress.emit(f'{PLATFORMS[provider]} 授权已回传，正在核对账号和模型…')
-            return {"label": label, "models": session.models()}
+            models = session.models()
+            result = {"label": label, "models": models}
+            if provider == 'deepseek':
+                result.update(account_warning=session.profile_warning, profile_diagnostics=session.profile_diagnostics)
+            return result
         def received(result):
             self.models = result["models"]
             self.model_cache[provider] = self.models
@@ -832,7 +843,7 @@ class StudioController(QObject):
             self.save()
             self.changed.emit("account")
             self.changed.emit("models")
-            self.set_status(f"{PLATFORMS[provider]} 已连接")
+            self.set_status(session.profile_warning if provider == 'deepseek' and session.profile_warning else f"{PLATFORMS[provider]} 已连接")
         self.set_status(f"在浏览器中完成 {PLATFORMS[provider]} 登录…")
         self.start_job("sign_in", {"provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account'}, action, received,
                        failure=lambda error:self._analysis_error(error))

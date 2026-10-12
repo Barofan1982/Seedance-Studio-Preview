@@ -110,6 +110,39 @@ class PlatformAuthTests(unittest.TestCase):
         self.session.reject_token('new-token')
         self.assertFalse(self.session.active_account())
 
+    def test_profile_sync_errors_keep_grant_and_catalog_and_recover(self):
+        self.session.record = {'issuer': PLATFORM_ORIGIN, 'token': 'synthetic-account-token', 'label': '原账号'}
+        save_protected_json(self.session.file, self.session.record)
+        for status in (403, 503, None):
+            with self.subTest(status=status):
+                error = PlatformError('模拟资料同步失败', diagnostics={'http_status': status, 'phase': 'http_response'})
+                with patch.object(self.session, '_platform', side_effect=error):
+                    models = self.session.models()
+                self.assertTrue(self.session.active_account())
+                self.assertEqual(load_protected_json(self.session.file)['token'], 'synthetic-account-token')
+                self.assertTrue(models)
+                self.assertIn('已授权', self.session.profile_warning)
+                self.assertEqual(self.session.profile_diagnostics['http_status'], status)
+        with patch.object(self.session, '_platform', return_value={'email': 'test@example.invalid'}):
+            self.session.models()
+        self.assertEqual(self.session.profile_warning, '')
+        self.assertEqual(self.session.profile_diagnostics, {})
+        self.assertEqual(self.session.label(), 'test@example.invalid')
+
+    def test_profile_credential_rejections_still_require_login(self):
+        for status, code in ((401, ''), (None, '40003')):
+            with self.subTest(status=status, code=code):
+                self.session.record = {'issuer': PLATFORM_ORIGIN, 'token': 'synthetic-account-token'}
+                save_protected_json(self.session.file, self.session.record)
+                if status == 401:
+                    remote = patch('agent_platforms.json_request', side_effect=PlatformError('登录失效', diagnostics={'http_status': status}))
+                else:
+                    remote = patch('agent_platforms.json_request', return_value={'code': 40003})
+                with remote, self.assertRaises(PlatformError):
+                    self.session.models()
+                self.assertFalse(self.session.active_account())
+                self.assertNotIn('token', load_protected_json(self.session.file))
+
     def test_frame_bytes_and_account_header_reach_deepseek_messages(self):
         self.session.record = {'issuer':PLATFORM_ORIGIN,'token':'account-secret'}
         request = {'model':'deepseek-flash', 'instructions':'遵守原要求', 'text':{'format':{'schema':{'type':'object'}}},
@@ -182,6 +215,37 @@ class PlatformUiTests(unittest.TestCase):
             persisted = json.loads((Path(directory) / 'state.json').read_text(encoding='utf-8'))
             self.assertEqual(persisted['ai_provider'], 'chatgpt')
             self.assertEqual(persisted['ai_models'], {'deepseek': 'deepseek-flash'})
+
+    def test_authorized_login_with_profile_403_is_a_warning_not_login_failure(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory, patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
+            auth = Mock(); auth.active_account.return_value = None; auth.label.return_value = '尚未登录'
+            controller = StudioController(Path(directory), auth=auth)
+            controller.state.update(ai_provider='deepseek', prompt='保留要求')
+            session = controller.platform_accounts.sessions['deepseek']
+            def authorize(**kwargs):
+                session.record = {'issuer': PLATFORM_ORIGIN, 'token': 'synthetic-account-token', 'label': '已授权账号'}
+                save_protected_json(session.file, session.record)
+                return session.label()
+            failures = []; controller.failed.connect(failures.append)
+            error = PlatformError('资料接口拒绝', diagnostics={'http_status': 403, 'endpoint': PLATFORM_ORIGIN + '/auth-api/v0/users/current'})
+            with patch.object(session, 'sign_in', side_effect=authorize), patch.object(session, '_platform', side_effect=error):
+                controller.sign_in()
+                deadline = time.monotonic() + 3
+                while controller.busy and time.monotonic() < deadline:
+                    self.application.processEvents(); time.sleep(.01)
+                self.assertFalse(controller.busy)
+            self.assertEqual(failures, [])
+            self.assertTrue(controller.models)
+            self.assertEqual(controller.state['prompt'], '保留要求')
+            call = controller.history.calls()[0]
+            self.assertEqual(call['status'], 'succeeded')
+            response = json.loads(call['response_json'])
+            self.assertEqual(response['profile_diagnostics']['http_status'], 403)
+            dialog = PlatformLoginDialog(controller)
+            self.assertIn('HTTP 403', dialog.notice.text())
+            self.assertIn('已连接', dialog.account.text())
+            dialog.close(); controller.close(); self.application.processEvents()
 
     def test_switching_and_login_dialog_preserve_draft_and_hide_registration_fields(self):
         with tempfile.TemporaryDirectory() as directory,patch('studio_controller.load_key',return_value=''),patch('studio_controller.load_openai_key',return_value=''):

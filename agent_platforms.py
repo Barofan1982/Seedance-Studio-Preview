@@ -174,6 +174,8 @@ class DeepSeekSession:
         self.cancelled = threading.Event()
         self.lock = threading.RLock()
         self.usage = {}
+        self.profile_warning = ""
+        self.profile_diagnostics = {}
 
     def active_account(self):
         with self.lock:
@@ -185,7 +187,19 @@ class DeepSeekSession:
     def models(self):
         if not self.active_account():
             return []
-        self.refresh_profile()
+        self.profile_warning = ""
+        self.profile_diagnostics = {}
+        try:
+            self.refresh_profile()
+        except PlatformError as error:
+            # Account details are optional; an exchanged grant is already saved.
+            # Only an actual credential rejection invalidates this authorization.
+            if not self.active_account() or error.diagnostics.get('http_status') == 401 or str(error.diagnostics.get('api_error_code')) == '40003':
+                raise
+            status = error.diagnostics.get('http_status')
+            reason = f"（HTTP {status}）" if status else ""
+            self.profile_warning = f"已授权；账号资料未同步{reason}。模型权限待调用验证。"
+            self.profile_diagnostics = dict(error.diagnostics)
         return [dict(model) for model in DEEPSEEK_MODELS]
 
     def headers(self):
@@ -316,6 +330,8 @@ class DeepSeekSession:
 
     def sign_out(self):
         self.cancel_sign_in()
+        self.profile_warning = ""
+        self.profile_diagnostics = {}
         token = self.record.get("token", "")
         self.reject_token(token)
         # Revocation is best effort; local credentials are removed immediately.

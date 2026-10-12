@@ -105,6 +105,7 @@ class PlatformLoginDialog(QDialog):
         self.account.setText(('已连接 · ' if active else '') + controller.analysis_label())
         self.fees.setText(FEES[provider])
         self.notice.setText('请在浏览器中完成授权，完成后自动返回连接状态。' if self.login_pending else
+                            controller.platform_accounts.sessions['deepseek'].profile_warning if provider == 'deepseek' and active and controller.platform_accounts.sessions['deepseek'].profile_warning else
                             'DeepSeek 模型来自官方预置目录，实际可用性在调用时验证。' if provider == 'deepseek' and active else '')
         self.provider.setEnabled(not controller.busy)
         self.model.setEnabled(bool(controller.models) and not controller.busy)
