@@ -13,7 +13,7 @@ STAGES = {
     'upload_video': '上传参考视频', 'draft': '抽帧与提示词优化', 'refine': '成片对比优化',
     'create': '提交视频生成', 'query': '查询视频任务', 'generation': '云端生成视频',
     'download': '下载与保存成片', 'models': '读取分析平台模型', 'sign_in': '登录分析平台',
-    'validation': '本地参数或文件校验',
+    'validation': '本地参数或文件校验', 'configure_api': '配置分析接口',
 }
 PHASE_NAMES = {
     'opening_connection_or_sending_request': '建立连接、发送请求或等待响应头（尚不能进一步区分）',
@@ -75,8 +75,18 @@ def response_snapshot(raw: bytes, headers=None, status=None, *, secrets=(), comp
             if isinstance(item, dict):
                 for key in ('request_id', 'requestId', 'RequestId', 'RequestID', 'trace_id'):
                     if item.get(key): ids[key] = str(item[key])
+    blocked = parsed is None and status in (403, 429) and bool(re.search(r'\bRequest\s+Blocked\b', text, re.I))
+    if parsed is None:
+        for name, pattern in (('event_id', r'Event\s+ID\s*:\s*([A-Za-z0-9_+=/-]{8,256})'),
+                              ('request_id', r'Request\s+ID\s*:\s*([A-Za-z0-9_+=/-]{8,256})')):
+            match = re.search(pattern, text, re.I)
+            if match:
+                ids.setdefault(name, safe_text(match[1], secrets))
+    if blocked and not message:
+        message = 'Request Blocked'
     return {
         'http_status': status, 'response_ids': ids, 'api_error_code': code, 'api_error_message': message,
+        'access_blocked': blocked,
         'response_body': json.dumps(clean, ensure_ascii=False, indent=2) if parsed is not None else safe_text(text, secrets),
         'response_json': clean, 'response_content_type': headers.get('Content-Type', '') if headers else '',
         'response_body_bytes_read': min(len(raw), MAX_ERROR_BYTES),
@@ -107,6 +117,8 @@ def exception_diagnostics(error, operation='', *, secrets=()):
 
 def possible_causes(code='', message='', status=None, phase='', *, operation=''):
     value = f'{code} {message}'.lower()
+    if 'request blocked' in value:
+        return ['平台访问防护拦截了请求；可能涉及出口 IP、访问策略或风控，不足以判定为账号额度问题。携服务器事件编号联系平台支持；不要连续重试。']
     if 'no eligible seedance accounts' in value or 'no available accounts' in value:
         return ['中转站没有可调度的 Seedance 账号；需维护人员检查分组、账号状态、Ark 能力和模型映射。']
     if 'tasktypeconstraint' in value:

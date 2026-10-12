@@ -1,4 +1,4 @@
-"""Account routing, callback security, platform capability and Qt state regression."""
+"""DeepSeek API setup, image transport, failure handling and Qt routing regression."""
 import os
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 import io
@@ -6,197 +6,165 @@ import json
 import tempfile
 import unittest
 import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication, QLineEdit
-from agent_platforms import (DeepSeekSession, PLATFORM_ORIGIN, INFERENCE_ORIGIN,
-                             PlatformError, challenge, parse_draft, read_messages_stream)
+from agent_platforms import DeepSeekApiSession, INFERENCE_ORIGIN, PlatformError, parse_draft, json_request
 from agent_prompt import AgentPromptClient
-from openai_prompt import RESPONSES_URL, _response_text
-from openai_prompt import PromptDraft
+from openai_prompt import RESPONSES_URL, _response_text, PromptDraft
 from secure_store import load_protected_json, save_protected_json
 from studio_controller import StudioController
 from platform_login_view import PlatformLoginDialog
 
 DRAFT = {'analysis':'保留镜头节奏', 'shots':[{'time':'0-4秒','visual':'小猫','camera':'固定','motion':'挥手'}],
          'seedance_prompt':'小猫挥手', 'uncertainties':[], 'keyframe_handles':[]}
+MODELS = {'data': [{'id':'deepseek-flash'}, {'id':'deepseek-v4-pro'}]}
 
 
-def stream_events(events):
-    return io.BytesIO(b''.join(('data: '+json.dumps(event)+'\n\n').encode() for event in events))
-
-
-class PlatformAuthTests(unittest.TestCase):
+class PlatformApiTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.path = Path(self.temp.name)
-        self.session = DeepSeekSession(self.path/'deepseek.bin')
+        self.temp = tempfile.TemporaryDirectory(); self.path = Path(self.temp.name)
+        self.session = DeepSeekApiSession(self.path / 'key.bin')
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def auth_flow(self, *, cancel_exchange=False, malicious=False):
-        observed = {}
-        def remote(path, *, body=None, token=''):
-            if path.endswith('/auth_init'):
-                observed['init'] = body
-                return {'authorize_url': 'https://evil.example/dsh/authorize' if malicious else PLATFORM_ORIGIN+'/dsh/authorize',
-                        'authorize_id':'attempt', 'expires_in':60}
-            if path.endswith('/auth_exchange'):
-                observed['exchange'] = body
-                if cancel_exchange:
-                    self.session.cancel_sign_in()
-                return {'token':'synthetic-account-token', 'authorized_url':PLATFORM_ORIGIN+'/dsh/authorized',
-                        'user':{'email':'test@example.invalid'}}
-            if path.endswith('/auth_cancel'):
-                observed['cancel'] = body
-                return {}
-            raise AssertionError(path)
-        return observed, remote
-
-    def test_pkce_callback_state_and_encrypted_persistence(self):
-        observed, remote = self.auth_flow()
-        with patch.object(self.session,'_platform',side_effect=remote):
-            # Use a callback sender independent of the sign-in worker.
-            def open_browser(url):
-                import threading
-                def deliver():
-                    callback = observed['init']['redirect_uri']
-                    for suffix in ('?state=wrong&code=bad','?state=x&state=y&code=bad', '?state=%E9%9D%9E%E6%B3%95&code=bad'):
-                        try: urllib.request.urlopen(callback+suffix,timeout=2).close()
-                        except urllib.error.HTTPError as e:
-                            observed.setdefault('rejected',[]).append(e.code)
-                            e.close()
-                    urllib.request.urlopen(callback+'?'+urllib.parse.urlencode({'state':observed['init']['state'],'code':'auth-code'}),timeout=2).close()
-                threading.Thread(target=deliver,daemon=True).start()
-                return True
-            result = self.session.sign_in(browser=open_browser,timeout=3)
-        self.assertEqual(result,'test@example.invalid')
-        self.assertEqual(observed['rejected'],[400,400,400])
-        self.assertEqual(observed['init']['code_challenge'],challenge(observed['exchange']['code_verifier']))
-        self.assertEqual(observed['init']['redirect_uri'],observed['exchange']['redirect_uri'])
-        self.assertNotIn(b'synthetic-account-token',(self.path/'deepseek.bin').read_bytes())
-        self.assertEqual(load_protected_json(self.path/'deepseek.bin')['issuer'],PLATFORM_ORIGIN)
-
-    def test_cancelled_late_exchange_cannot_replace_existing_account(self):
-        self.session.record = {'issuer':PLATFORM_ORIGIN,'token':'old-token','label':'原账号'}
-        save_protected_json(self.session.file,self.session.record)
-        observed, remote = self.auth_flow(cancel_exchange=True)
-        def browser(url):
-            import threading
-            threading.Thread(target=lambda:urllib.request.urlopen(observed['init']['redirect_uri']+'?'+urllib.parse.urlencode({'state':observed['init']['state'],'code':'auth-code'}),timeout=2).close(),daemon=True).start()
-            return True
-        with patch.object(self.session,'_platform',side_effect=remote), self.assertRaises(PlatformError):
-            self.session.sign_in(browser=browser,timeout=3)
-        self.assertEqual(self.session.record['token'],'old-token')
-        self.assertEqual(load_protected_json(self.session.file)['token'],'old-token')
-        self.assertIn('cancel',observed)
-
-    def test_untrusted_authorization_url_never_opens_browser(self):
-        observed, remote = self.auth_flow(malicious=True)
-        browser = Mock()
-        with patch.object(self.session,'_platform',side_effect=remote), self.assertRaises(PlatformError):
-            self.session.sign_in(browser=browser)
-        browser.assert_not_called()
-        self.assertFalse(self.session.active_account())
-
-    def test_old_401_cannot_clear_replacement_login(self):
-        self.session.record = {'issuer':PLATFORM_ORIGIN,'token':'new-token'}
-        self.session.reject_token('old-token')
-        self.assertTrue(self.session.active_account())
-        self.session.reject_token('new-token')
-        self.assertFalse(self.session.active_account())
-
-    def test_profile_sync_errors_keep_grant_and_catalog_and_recover(self):
-        self.session.record = {'issuer': PLATFORM_ORIGIN, 'token': 'synthetic-account-token', 'label': '原账号'}
+    def ready(self):
+        self.session.record = {'api_key': 'synthetic-api-key', 'verified': True}
         save_protected_json(self.session.file, self.session.record)
-        for status in (403, 503, None):
-            with self.subTest(status=status):
-                error = PlatformError('模拟资料同步失败', diagnostics={'http_status': status, 'phase': 'http_response'})
-                with patch.object(self.session, '_platform', side_effect=error):
-                    models = self.session.models()
-                self.assertTrue(self.session.active_account())
-                self.assertEqual(load_protected_json(self.session.file)['token'], 'synthetic-account-token')
-                self.assertTrue(models)
-                self.assertIn('已授权', self.session.profile_warning)
-                self.assertEqual(self.session.profile_diagnostics['http_status'], status)
-        with patch.object(self.session, '_platform', return_value={'email': 'test@example.invalid'}):
+
+    def request(self, model='deepseek-flash'):
+        return {'model': model, 'instructions': '遵守原要求', 'text': {'format': {'schema': {'type':'object'}}},
+                'input': [{'role':'user', 'content': [{'type':'input_text','text':'替换角色'},
+                                                     {'type':'input_image','image_url':'data:image/jpeg;base64,YWJj'}]}]}
+
+    def test_setup_only_reads_models_and_saves_encrypted_key(self):
+        with patch('agent_platforms.json_request', return_value=MODELS) as send:
+            models = self.session.configure_key('synthetic-api-key')
+        self.assertEqual(send.call_args.args[0], INFERENCE_ORIGIN + '/models')
+        self.assertNotIn('body', send.call_args.kwargs)
+        self.assertEqual(send.call_args.kwargs['headers']['Authorization'], 'Bearer synthetic-api-key')
+        self.assertTrue(self.session.active_account()); self.assertEqual(len(models), 2)
+        self.assertNotIn(b'synthetic-api-key', self.session.file.read_bytes())
+        self.assertTrue(DeepSeekApiSession(self.session.file).active_account())
+
+    def test_invalid_replacement_and_cancelled_validation_preserve_working_key(self):
+        self.ready()
+        with patch('agent_platforms.json_request', side_effect=PlatformError('密钥无效', diagnostics={'http_status':401})), self.assertRaises(PlatformError):
+            self.session.configure_key('bad-api-key')
+        self.assertEqual(self.session.key(), 'synthetic-api-key')
+        def cancel(*args, **kwargs):
+            self.session.cancel_pending(); return MODELS
+        with patch('agent_platforms.json_request', side_effect=cancel), self.assertRaises(PlatformError):
+            self.session.configure_key('replacement-key')
+        self.assertEqual(load_protected_json(self.session.file)['api_key'], 'synthetic-api-key')
+
+    def test_invalid_key_and_unknown_model_list_do_not_commit(self):
+        with patch('agent_platforms.json_request') as send, self.assertRaises(PlatformError):
+            self.session.configure_key('bad key')
+        send.assert_not_called()
+        with patch('agent_platforms.json_request', return_value={'data':[{'id':'unknown-model'}]}), self.assertRaises(PlatformError):
+            self.session.configure_key('synthetic-api-key')
+        self.assertFalse(self.session.active_account())
+
+    def test_401_clears_only_rejected_key_and_429_keeps_existing_key(self):
+        self.ready(); self.session.reject_key('old-key'); self.assertTrue(self.session.active_account())
+        with patch('agent_platforms.json_request', side_effect=PlatformError('限流', diagnostics={'http_status':429})), self.assertRaises(PlatformError):
             self.session.models()
-        self.assertEqual(self.session.profile_warning, '')
-        self.assertEqual(self.session.profile_diagnostics, {})
-        self.assertEqual(self.session.label(), 'test@example.invalid')
+        self.assertTrue(self.session.active_account())
+        with patch('agent_platforms.json_request', side_effect=PlatformError('无效', diagnostics={'http_status':401})), self.assertRaises(PlatformError):
+            self.session.models()
+        self.assertFalse(self.session.active_account())
 
-    def test_profile_credential_rejections_still_require_login(self):
-        for status, code in ((401, ''), (None, '40003')):
-            with self.subTest(status=status, code=code):
-                self.session.record = {'issuer': PLATFORM_ORIGIN, 'token': 'synthetic-account-token'}
-                save_protected_json(self.session.file, self.session.record)
-                if status == 401:
-                    remote = patch('agent_platforms.json_request', side_effect=PlatformError('登录失效', diagnostics={'http_status': status}))
-                else:
-                    remote = patch('agent_platforms.json_request', return_value={'code': 40003})
-                with remote, self.assertRaises(PlatformError):
-                    self.session.models()
-                self.assertFalse(self.session.active_account())
-                self.assertNotIn('token', load_protected_json(self.session.file))
+    def test_image_bytes_schema_and_api_header_reach_chat_completions(self):
+        self.ready()
+        result = {'choices':[{'finish_reason':'stop','message':{'content':json.dumps(DRAFT)}}],
+                  'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}}
+        with patch('agent_platforms.json_request', return_value=result) as send:
+            self.assertEqual(self.session.complete(self.request()), DRAFT)
+        self.assertEqual(send.call_args.args[0], INFERENCE_ORIGIN + '/chat/completions')
+        body = send.call_args.kwargs['body']
+        self.assertEqual(body['messages'][1]['content'][1]['image_url']['url'], 'data:image/jpeg;base64,YWJj')
+        self.assertEqual(body['response_format'], {'type':'json_object'})
+        self.assertIn('JSON', body['messages'][0]['content']); self.assertFalse(body['stream'])
+        self.assertEqual(self.session.usage['total_tokens'], 15)
+        self.assertNotIn('x-dsh-auth-token', send.call_args.kwargs['headers'])
 
-    def test_frame_bytes_and_account_header_reach_deepseek_messages(self):
-        self.session.record = {'issuer':PLATFORM_ORIGIN,'token':'account-secret'}
-        request = {'model':'deepseek-flash', 'instructions':'遵守原要求', 'text':{'format':{'schema':{'type':'object'}}},
-                   'input':[{'role':'user','content':[{'type':'input_text','text':'替换角色'}, {'type':'input_image','image_url':'data:image/jpeg;base64,YWJj'}]}]}
-        events = [{'type':'message_start','message':{'usage':{'input_tokens':10}}},
-                  {'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}},
-                  {'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':json.dumps(DRAFT)}},
-                  {'type':'content_block_stop','index':0}, {'type':'message_delta','delta':{'stop_reason':'end_turn'},'usage':{'output_tokens':5}}, {'type':'message_stop'}]
-        response = stream_events(events)
-        with patch('agent_platforms.open_request',return_value=response) as send:
-            self.assertEqual(self.session.complete(request),DRAFT)
-        args,kwargs = send.call_args
-        self.assertEqual(args[0],INFERENCE_ORIGIN+'/v1/messages')
-        self.assertEqual(kwargs['headers']['x-dsh-auth-token'],'account-secret')
-        self.assertNotIn('Authorization',kwargs['headers'])
-        self.assertEqual(kwargs['body']['messages'][0]['content'][1]['source']['data'],'YWJj')
-        self.assertEqual(self.session.usage,{'input_tokens':10,'output_tokens':5})
-        request['model'] = 'deepseek-v4-pro'
-        with patch('agent_platforms.open_request') as send,self.assertRaises(PlatformError):
-            self.session.complete(request)
+    def test_text_model_blocks_images_before_paid_request(self):
+        self.ready()
+        with patch('agent_platforms.json_request') as send, self.assertRaises(PlatformError):
+            self.session.complete(self.request('deepseek-v4-pro'))
         send.assert_not_called()
 
-    def test_partial_stream_and_invalid_draft_are_rejected(self):
-        with self.assertRaises(PlatformError):
-            read_messages_stream(stream_events([{'type':'message_start','message':{}}, {'type':'message_stop'}]))
-        with self.assertRaises(PlatformError):parse_draft({'seedance_prompt':'残缺方案'})
-        self.assertEqual(parse_draft('```json\n'+json.dumps(DRAFT)+'\n```'),DRAFT)
+    def test_truncated_empty_and_invalid_drafts_are_rejected(self):
+        self.ready()
+        for choice in ({'finish_reason':'length','message':{'content':json.dumps(DRAFT)}},
+                       {'finish_reason':'stop','message':{'content':''}}):
+            with patch('agent_platforms.json_request', return_value={'choices':[choice]}), self.assertRaises(PlatformError):
+                self.session.complete(self.request())
+        with self.assertRaises(PlatformError): parse_draft({'seedance_prompt':'残缺方案'})
+        self.assertEqual(parse_draft('```json\n'+json.dumps(DRAFT)+'\n```'), DRAFT)
 
+    def test_blocked_setup_exposes_event_id_without_retry_or_key_commit(self):
+        from error_diagnostics import possible_causes
+        body = b'<html><h1>Request Blocked</h1><p>Event ID: test-event-12345678</p></html>'
+        error = urllib.error.HTTPError(INFERENCE_ORIGIN + '/models',429,'Blocked',{'Content-Type':'text/html'},io.BytesIO(body))
+        with patch('agent_platforms.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = error
+            with self.assertRaises(PlatformError) as caught: self.session.configure_key('synthetic-api-key')
+        self.assertEqual(opener.return_value.open.call_count, 1); self.assertFalse(self.session.active_account())
+        trace = caught.exception.diagnostics
+        self.assertTrue(trace['access_blocked']); self.assertEqual(trace['response_ids']['event_id'], 'test-event-12345678')
+        self.assertEqual(trace['timeout_seconds'], 30); self.assertEqual(trace['request_body_bytes'], 0)
+        self.assertIn('访问防护', possible_causes(message=trace['api_error_message'],status=429)[0])
 
-    def test_account_adapter_never_falls_back_to_openai_paid_api(self):
-        session = Mock();session.complete.return_value=DRAFT
-        client = AgentPromptClient(session,'deepseek-flash')
-        with patch('openai_prompt.urllib.request.build_opener') as paid:
-            result = client._post(RESPONSES_URL,json.dumps({'model':'deepseek-flash'}).encode(),'application/json')
-            self.assertEqual(json.loads(_response_text(result)),DRAFT)
-        paid.assert_not_called()
-
-
-    def test_http_error_retains_status_and_redacts_credential(self):
-        from agent_platforms import json_request
-        error=urllib.error.HTTPError(INFERENCE_ORIGIN+'/v1/messages',401,'Unauthorized',{},io.BytesIO(b'{"error":{"message":"bad account-secret","type":"unauthorized"}}'))
+    def test_http_diagnostics_redact_key_and_retain_api_status(self):
+        error=urllib.error.HTTPError(INFERENCE_ORIGIN+'/models',401,'Unauthorized',{},io.BytesIO(b'{"error":{"message":"bad synthetic-api-key","type":"unauthorized"}}'))
         with patch('agent_platforms.urllib.request.build_opener') as opener:
             opener.return_value.open.side_effect=error
             with self.assertRaises(PlatformError) as caught:
-                json_request(INFERENCE_ORIGIN+'/v1/messages',body={},secret_values=('account-secret',))
+                json_request(INFERENCE_ORIGIN+'/models',secret_values=('synthetic-api-key',))
         self.assertEqual(caught.exception.diagnostics['http_status'],401)
-        self.assertEqual(caught.exception.diagnostics['method'],'POST')
-        self.assertNotIn('account-secret',json.dumps(caught.exception.diagnostics))
+        self.assertNotIn('synthetic-api-key',json.dumps(caught.exception.diagnostics))
+
+    def test_api_adapter_never_falls_back_to_openai_paid_api(self):
+        session=Mock();session.complete.return_value=DRAFT
+        client=AgentPromptClient(session,'deepseek-flash')
+        with patch('openai_prompt.urllib.request.build_opener') as paid:
+            result=client._post(RESPONSES_URL,json.dumps({'model':'deepseek-flash'}).encode(),'application/json')
+        self.assertEqual(json.loads(_response_text(result)),DRAFT);paid.assert_not_called()
 
 
 class PlatformUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_api_dialog_validates_without_browser_and_does_not_log_key(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory, patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
+            auth = Mock(); auth.active_account.return_value = None; auth.label.return_value = '尚未登录'
+            controller = StudioController(Path(directory), auth=auth)
+            controller.state.update(ai_provider='deepseek', prompt='保留要求')
+            dialog = PlatformLoginDialog(controller); dialog.show(); self.application.processEvents()
+            self.assertTrue(dialog.api_key.isVisible()); self.assertEqual(dialog.login_button.text(), '保存并校验')
+            dialog.api_key.setText('synthetic-api-key')
+            with patch('agent_platforms.json_request', return_value=MODELS) as send, patch('chatgpt_auth.webbrowser.open') as browser:
+                dialog.login()
+                deadline = time.monotonic() + 5
+                while controller.busy and time.monotonic() < deadline:
+                    self.application.processEvents(); time.sleep(.01)
+                self.assertFalse(controller.busy)
+                browser.assert_not_called()
+                self.assertEqual(send.call_args.args[0], INFERENCE_ORIGIN + '/models')
+            self.assertTrue(controller.analysis_account()); self.assertEqual(controller.state['prompt'], '保留要求')
+            self.assertEqual(dialog.api_key.text(), '')
+            call = controller.history.calls()[0]
+            self.assertEqual(call['status'], 'succeeded'); self.assertEqual(call['operation'], 'configure_api')
+            self.assertNotIn('synthetic-api-key', json.dumps(call))
+            self.assertIn('单独计费', dialog.fees.text())
+            dialog.close(); controller.close(); self.application.processEvents()
 
     def test_saved_unavailable_provider_falls_back_without_losing_draft(self):
         with tempfile.TemporaryDirectory() as directory, patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
@@ -216,36 +184,6 @@ class PlatformUiTests(unittest.TestCase):
             self.assertEqual(persisted['ai_provider'], 'chatgpt')
             self.assertEqual(persisted['ai_models'], {'deepseek': 'deepseek-flash'})
 
-    def test_authorized_login_with_profile_403_is_a_warning_not_login_failure(self):
-        import time
-        with tempfile.TemporaryDirectory() as directory, patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
-            auth = Mock(); auth.active_account.return_value = None; auth.label.return_value = '尚未登录'
-            controller = StudioController(Path(directory), auth=auth)
-            controller.state.update(ai_provider='deepseek', prompt='保留要求')
-            session = controller.platform_accounts.sessions['deepseek']
-            def authorize(**kwargs):
-                session.record = {'issuer': PLATFORM_ORIGIN, 'token': 'synthetic-account-token', 'label': '已授权账号'}
-                save_protected_json(session.file, session.record)
-                return session.label()
-            failures = []; controller.failed.connect(failures.append)
-            error = PlatformError('资料接口拒绝', diagnostics={'http_status': 403, 'endpoint': PLATFORM_ORIGIN + '/auth-api/v0/users/current'})
-            with patch.object(session, 'sign_in', side_effect=authorize), patch.object(session, '_platform', side_effect=error):
-                controller.sign_in()
-                deadline = time.monotonic() + 3
-                while controller.busy and time.monotonic() < deadline:
-                    self.application.processEvents(); time.sleep(.01)
-                self.assertFalse(controller.busy)
-            self.assertEqual(failures, [])
-            self.assertTrue(controller.models)
-            self.assertEqual(controller.state['prompt'], '保留要求')
-            call = controller.history.calls()[0]
-            self.assertEqual(call['status'], 'succeeded')
-            response = json.loads(call['response_json'])
-            self.assertEqual(response['profile_diagnostics']['http_status'], 403)
-            dialog = PlatformLoginDialog(controller)
-            self.assertIn('HTTP 403', dialog.notice.text())
-            self.assertIn('已连接', dialog.account.text())
-            dialog.close(); controller.close(); self.application.processEvents()
 
     def test_switching_and_login_dialog_preserve_draft_and_hide_registration_fields(self):
         with tempfile.TemporaryDirectory() as directory,patch('studio_controller.load_key',return_value=''),patch('studio_controller.load_openai_key',return_value=''):
@@ -263,7 +201,9 @@ class PlatformUiTests(unittest.TestCase):
                 self.assertEqual(controller.state['prompt'],'保留我的提示词')
                 self.assertEqual(controller.state['brief'],'创作要求')
                 self.assertEqual(controller.state['openai_model'],'chatgpt-model')
-            self.assertFalse(dialog.findChildren(QLineEdit))
+            self.assertEqual(dialog.findChildren(QLineEdit), [dialog.api_key])
+            self.assertFalse(dialog.api_key.isVisible())
+            self.assertEqual(dialog.api_key.echoMode(), QLineEdit.EchoMode.Password)
             for size in ((650,460),(550,420)):
                 dialog.resize(*size);self.application.processEvents()
                 self.assertTrue(dialog.rect().contains(dialog.login_button.geometry()))
@@ -277,7 +217,7 @@ class PlatformUiTests(unittest.TestCase):
             controller=StudioController(Path(directory),auth=auth)
             controller.state.update(ai_provider='deepseek', prompt='原始要求',brief='原始要求',mode='纯文本')
             session=controller.platform_accounts.sessions['deepseek']
-            session.record={'issuer':PLATFORM_ORIGIN,'token':'synthetic-account-token'}
+            session.record={'api_key':'synthetic-api-key','verified':True}
             controller.models=[{'slug':'deepseek-flash','vision':True}]
             def pump():
                 deadline=time.monotonic()+3

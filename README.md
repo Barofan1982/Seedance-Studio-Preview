@@ -11,9 +11,11 @@ python -m pip install -r requirements.txt
 pythonw start.pyw
 ```
 
-当前为 Python 源码版，尚未提供独立 EXE；需要 Windows、Python 和本项目依赖。视频抽帧另需 PATH 中的 FFmpeg/FFprobe。
+提供 Windows 64 位免安装便携版：解压 `Seedance-Studio-Preview-Windows-x64.zip`，双击文件夹中的 `Seedance Studio.exe`。需保留整个文件夹及 `_internal` 目录；使用者无需安装 Python、Qt 或 FFmpeg。
 
-首次迁移已复制原工具的设置、加密密钥、ChatGPT 登录、素材清单、提示词和历史。右上角可选择 ChatGPT 或 DeepSeek 并登录授权；启动时刷新上次选择的平台。DeepSeek 登录和图片分析客户端已接入，实际授权需在浏览器完成。接入状态与额度来源见 [PLATFORM_LOGIN.md](PLATFORM_LOGIN.md)。
+以上 Python 启动步骤仅用于源码开发。源码运行需 Python、本项目依赖及 PATH 中的 FFmpeg/FFprobe。
+
+首次迁移已复制原工具的设置、加密密钥、ChatGPT 登录、素材清单、提示词和历史。右上角可选择 ChatGPT 账号登录或 DeepSeek API Key 接入；启动时刷新上次选择的平台。DeepSeek 通过 API 分析文本和图片，校验密钥只读取模型列表，推理按接口用量单独计费。连接方式与额度来源见 [PLATFORM_LOGIN.md](PLATFORM_LOGIN.md)。
 
 ## 界面
 
@@ -84,3 +86,17 @@ python -m unittest discover -s tests -v
 本项目拥有独立 Git 仓库：[Barofan1982/Seedance-Studio-Preview](https://github.com/Barofan1982/Seedance-Studio-Preview)，与上层 `youtube_downloader` 仓库分别维护。
 
 仓库保存应用源码、文档、测试和界面资源。`.gitignore` 排除本地备份、诊断记录、截图、快捷方式、运行数据及凭证；`%APPDATA%\SeedanceVideoStudioPreview` 中的个人数据独立保存，不随代码上传。`backups/` 继续作为本机额外回退副本，不再是唯一回退方式。
+
+## 构建 Windows 便携版
+
+在 Windows 64 位环境中安装运行依赖与 `requirements-build.txt`。构建机需准备 FFmpeg、FFprobe 及其 DLL；可通过环境变量 `SEEDANCE_FFMPEG_DIR` 指定所在目录。
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-build.txt
+python -m PyInstaller --noconfirm --clean SeedanceStudio.spec
+python package_portable.py
+```
+
+EXE 位于 `dist/Seedance Studio/Seedance Studio.exe`，可分发 ZIP 位于 `dist/Seedance-Studio-Preview-Windows-x64.zip`，另生成 SHA-256 校验文件。
+打包过程只收集程序、界面资源和运行库，不复制个人设置、密钥、素材与历史。随包保留第三方许可与源码位置说明。
+打包校验在移除外部 Python/FFmpeg PATH 的子进程中运行，使用临时空白资料目录，验证 1280 × 800 窗口按钮边界、中文翻译、视频编码/抽帧/播放、Windows 加密和草稿保存，不调用收费接口。校验失败不会生成分发 ZIP。

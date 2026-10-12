@@ -59,6 +59,22 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(run.call_args.kwargs["capture_output"])
 
+    def test_frozen_media_uses_bundled_executable_without_path_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / 'media'; media.mkdir()
+            (media / 'ffprobe.exe').write_bytes(b'test-fixture')
+            command = ['ffprobe', '-version']
+            with patch('media_assets.sys.frozen', True, create=True), patch('media_assets.sys._MEIPASS', directory, create=True), patch('media_assets.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+                _run_media_tool(command)
+            self.assertEqual(run.call_args.args[0], [str(media / 'ffprobe.exe'), '-version'])
+            self.assertEqual(command, ['ffprobe', '-version'])
+
+    def test_missing_bundled_media_does_not_fall_back_to_system_tools(self):
+        with tempfile.TemporaryDirectory() as directory, patch('media_assets.sys.frozen', True, create=True), patch('media_assets.sys._MEIPASS', directory, create=True), patch('media_assets.subprocess.run') as run:
+            with self.assertRaisesRegex(ValueError, '便携版'):
+                _run_media_tool(['ffmpeg', '-version'])
+            run.assert_not_called()
+
     def test_thirty_second_references_and_outputs_can_be_sampled_but_longer_references_are_rejected(self):
         with patch("media_assets.video_duration", return_value=30), patch("media_assets._run_media_tool"):
             import shutil

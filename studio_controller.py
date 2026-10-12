@@ -300,10 +300,10 @@ class StudioController(QObject):
         temporary.replace(self.state_file)
         self.changed.emit("saved")
 
-    def start_job(self, operation, request, action, success, *, task_id="", failure=None, background=False, on_started=None):
+    def start_job(self, operation, request, action, success, *, task_id="", failure=None, background=False, on_started=None, extra_secrets=()):
         if self.busy or self.closed or background and self.query_busy:
             return False
-        secrets = (self.api_key, self.openai_key)
+        secrets = (self.api_key, self.openai_key, self.platform_accounts.sessions['deepseek'].record.get('api_key', ''), *extra_secrets)
         try:
             call_id = self.history.begin_call(operation, request, task_id, secrets)
             if on_started:
@@ -802,65 +802,64 @@ class StudioController(QObject):
             return
         provider = self.state['ai_provider']
         session = self.auth if provider == 'chatgpt' else self.platform_accounts.sessions[provider]
-        def action():
-            models = session.models()
-            if provider == 'deepseek':
-                return {'models': models, 'account_warning': session.profile_warning,
-                        'profile_diagnostics': session.profile_diagnostics}
-            return models
-        def received(result):
-            models = result['models'] if provider == 'deepseek' else result
+        def received(models):
             self.models = models
             self.model_cache[provider] = models
-            if models and self.analysis_model() not in {m["slug"] for m in models}:
+            if models and self.analysis_model() not in {m['slug'] for m in models}:
                 self.set_analysis_model(models[0]['slug'])
                 self.save()
-            self.changed.emit("models")
-            self.changed.emit("account")
-            self.set_status(session.profile_warning if provider == 'deepseek' and session.profile_warning else "准备就绪")
-        self.set_status(f"正在连接 {PLATFORMS[provider]}…")
-        self.start_job("models", {"provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account'}, action, received,
-                       failure=lambda error: self._analysis_error(error))
+            self.changed.emit('models')
+            self.changed.emit('account')
+            self.set_status('准备就绪')
+        self.set_status(f'正在连接 {PLATFORMS[provider]}…')
+        self.start_job('models', {'provider': provider, 'auth_mode': 'chatgpt_plan' if provider == 'chatgpt' else 'api_key'},
+                       session.models, received, failure=self._analysis_error)
 
     def sign_in(self):
         if self.busy:
             return
-        provider = self.state['ai_provider']
-        session = self.auth if provider == 'chatgpt' else self.platform_accounts.sessions[provider]
+        if self.state['ai_provider'] != 'chatgpt':
+            self.failed.emit('DeepSeek 使用 API Key，请在连接窗口填写接口密钥。')
+            return
         def action():
-            label = session.sign_in() if provider == 'chatgpt' else session.sign_in(progress=self._progress.emit)
-            self._progress.emit(f'{PLATFORMS[provider]} 授权已回传，正在核对账号和模型…')
-            models = session.models()
-            result = {"label": label, "models": models}
-            if provider == 'deepseek':
-                result.update(account_warning=session.profile_warning, profile_diagnostics=session.profile_diagnostics)
-            return result
+            return {'label': self.auth.sign_in(), 'models': self.auth.models()}
         def received(result):
-            self.models = result["models"]
-            self.model_cache[provider] = self.models
-            if self.models and self.analysis_model() not in {m["slug"] for m in self.models}:
+            self.models = result['models']
+            self.model_cache['chatgpt'] = self.models
+            if self.models and self.analysis_model() not in {m['slug'] for m in self.models}:
                 self.set_analysis_model(self.models[0]['slug'])
             self.save()
-            self.changed.emit("account")
-            self.changed.emit("models")
-            self.set_status(session.profile_warning if provider == 'deepseek' and session.profile_warning else f"{PLATFORMS[provider]} 已连接")
-        self.set_status(f"在浏览器中完成 {PLATFORMS[provider]} 登录…")
-        self.start_job("sign_in", {"provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account'}, action, received,
-                       failure=lambda error:self._analysis_error(error))
+            self.changed.emit('account'); self.changed.emit('models')
+            self.set_status('ChatGPT 已连接')
+        self.set_status('在浏览器中完成 ChatGPT 登录…')
+        self.start_job('sign_in', {'provider': 'chatgpt', 'auth_mode': 'chatgpt_plan'}, action, received, failure=self._analysis_error)
+
+    def configure_deepseek_api(self, key):
+        if self.busy or self.state['ai_provider'] != 'deepseek':
+            return
+        session = self.platform_accounts.sessions['deepseek']
+        def received(models):
+            self.models = models; self.model_cache['deepseek'] = models
+            if self.analysis_model() not in {m['slug'] for m in models}:
+                self.set_analysis_model(models[0]['slug'])
+            self.save()
+            self.changed.emit('account'); self.changed.emit('models')
+            self.set_status('DeepSeek API 已连接；分析按接口用量计费。')
+        self.set_status('正在校验 DeepSeek 接口密钥（不调用推理）…')
+        self.start_job('configure_api', {'provider': 'deepseek', 'auth_mode': 'api_key', 'endpoint': 'https://api.deepseek.com/models'},
+                       lambda: session.configure_key(key), received, failure=self._analysis_error, extra_secrets=(key,))
 
     def cancel_ai_login(self):
-        if self.state['ai_provider'] != 'chatgpt':
-            self.platform_accounts.sessions[self.state['ai_provider']].cancel_sign_in()
+        if self.state['ai_provider'] == 'deepseek':
+            self.platform_accounts.sessions['deepseek'].cancel_pending()
 
     def sign_out_ai(self):
-        if self.busy or self.state['ai_provider'] == 'chatgpt':
+        if self.busy or self.state['ai_provider'] != 'deepseek':
             return
-        self.platform_accounts.sessions[self.state['ai_provider']].sign_out()
-        self.models = []
-        self.model_cache.pop(self.state['ai_provider'], None)
-        self.changed.emit('account')
-        self.changed.emit('models')
-        self.set_status('已退出当前分析平台')
+        self.platform_accounts.sessions['deepseek'].clear_key()
+        self.models = []; self.model_cache.pop('deepseek', None)
+        self.changed.emit('account'); self.changed.emit('models')
+        self.set_status('已清除 DeepSeek 接口密钥')
 
     def _analysis_error(self, error):
         self.changed.emit('account')
@@ -870,7 +869,7 @@ class StudioController(QObject):
     def analyze(self):
         provider = self.state['ai_provider']
         if not self.analysis_account():
-            raise ValueError(f"先在右上角登录 {PLATFORMS[provider]}。")
+            raise ValueError("先在右上角登录 ChatGPT。" if provider == "chatgpt" else "先在连接窗口配置 DeepSeek API Key。")
         model = self.analysis_model()
         if model not in {m["slug"] for m in self.models}:
             raise ValueError("账号模型列表尚未就绪，请在设置中刷新模型。")
@@ -940,8 +939,8 @@ class StudioController(QObject):
 
         self.set_status("正在智能分析素材…" if not generated else "正在智能对比参考视频与成片…")
         self.start_job("refine" if generated else "draft", {
-            "model": model, "provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account',
-            "billing_source": "ChatGPT 会员额度" if provider == 'chatgpt' else 'DeepSeek 账号余额 / 赠送额度',
+            "model": model, "provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'api_key',
+            "billing_source": "ChatGPT 会员额度" if provider == 'chatgpt' else 'DeepSeek API 余额（接口单独计费）',
             "audio_transcription": {"enabled": transcribe, "billing_source": "OpenAI 接口单独计费" if transcribe else "未启用"},
             "generation_settings": settings, "creative_brief": brief, "assets": manifest(assets),
             "previous_prompt": previous, "generated_video": str(generated) if generated else "",
@@ -1382,7 +1381,7 @@ class StudioController(QObject):
 
     def close(self):
         self.closed = True
-        self.platform_accounts.cancel_sign_in()
+        self.platform_accounts.cancel_pending()
         self._save_timer.stop()
         self._poll.stop()
         self._queue_timer.stop()

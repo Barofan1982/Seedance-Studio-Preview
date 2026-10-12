@@ -5,7 +5,9 @@
 !/*.py
 !/*.pyw
 !/*.md
+!/*.spec
 !/requirements.txt
+!/requirements-build.txt
 !/tests/
 !/resources/
 

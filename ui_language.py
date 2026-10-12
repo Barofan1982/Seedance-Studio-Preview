@@ -60,6 +60,7 @@ FIELD_NAMES = {
 }
 
 ENUM_NAMES = {
+    'api_key': '接口密钥',
     'reference':'参考生视频', 'first_frame':'首帧', 'first_last_frame':'首尾帧', 'last_frame':'尾帧',
     'reference_image':'参考图片', 'reference_video':'参考视频', 'reference_audio':'参考音频',
     'edit':'编辑视频', 'extend':'延长视频', 'text':'文字', 'image':'图片', 'video':'视频', 'audio':'音频',

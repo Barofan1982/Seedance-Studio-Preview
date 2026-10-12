@@ -130,7 +130,7 @@ class SettingsDialog(QDialog):
         platform_layout.setContentsMargins(0,0,0,0)
         self.platform_label = label(PLATFORMS[controller.state['ai_provider']], 'Muted')
         platform_layout.addWidget(self.platform_label, 1)
-        platform_layout.addWidget(button('登录 / 切换', callback=self.platform_login))
+        platform_layout.addWidget(button('连接 / 切换', callback=self.platform_login))
         form.addRow('分析平台', platform_row)
         model_row = QWidget()
         model_layout = QHBoxLayout(model_row)
@@ -202,7 +202,7 @@ class SettingsDialog(QDialog):
             self.model.setCurrentIndex(selected)
         self.model.setEnabled(bool(self.controller.models))
         if not self.controller.models:
-            self.model.addItem("登录分析平台后获取模型")
+            self.model.addItem("连接分析平台后获取模型")
 
     def updated(self, category):
         if category in {"models", "account"}:
@@ -558,7 +558,7 @@ class StudioWindow(QMainWindow):
         layout.addWidget(self.job_progress)
         bottom = QHBoxLayout()
         self.ai_button = button("智能优化提示词", "Primary", "spark", self.analyze)
-        self.ai_button.setToolTip("使用当前登录的分析平台理解参考画面并优化提示词；额度来源可在平台登录窗口查看。")
+        self.ai_button.setToolTip("使用当前连接的分析平台理解参考画面并优化提示词；计费方式可在连接窗口查看。")
         bottom.addWidget(self.ai_button)
         self.mention_button = button("@ 素材", "Quiet", callback=self.mention_menu)
         bottom.addWidget(self.mention_button)
@@ -791,7 +791,7 @@ class StudioWindow(QMainWindow):
         if category in {"all", "account", "models"}:
             active = self.controller.analysis_account()
             platform = PLATFORMS[state['ai_provider']]
-            self.account_button.setText(f"{platform} 已连接" if active else "选择分析平台 / 登录")
+            self.account_button.setText(f"{platform} 已连接" if active else "连接分析平台")
             self.account_button.setToolTip(self.controller.analysis_label())
         if category in {"all", "history"}:
             self.refresh_history()

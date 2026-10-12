@@ -8,6 +8,7 @@ import mimetypes
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 from dataclasses import dataclass
@@ -46,6 +47,13 @@ class MediaAsset:
 
 
 def _run_media_tool(command: list[str], timeout: int = 45) -> subprocess.CompletedProcess:
+    command = list(command)
+    if getattr(sys, "frozen", False) and Path(command[0]).name.lower() in {"ffmpeg", "ffmpeg.exe", "ffprobe", "ffprobe.exe"}:
+        name = Path(command[0]).stem.lower() + ".exe"
+        tool = Path(sys._MEIPASS) / "media" / name
+        if not tool.is_file():
+            raise ValueError("视频处理组件缺失，请重新解压完整的便携版文件夹。")
+        command[0] = str(tool)
     # pythonw has no console; without this flag every FFmpeg/FFprobe invocation
     # opens a new console window while inspecting or extracting local media.
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
@@ -53,7 +61,7 @@ def _run_media_tool(command: list[str], timeout: int = 45) -> subprocess.Complet
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False,
                                 stdin=subprocess.DEVNULL, **options)
     except FileNotFoundError as error:
-        raise ValueError("未找到视频处理组件，请安装 FFmpeg 并加入系统环境变量。") from error
+        raise ValueError("未找到视频处理组件，请检查便携版是否完整；源码运行时需配置 FFmpeg。") from error
     except subprocess.TimeoutExpired as error:
         raise ValueError("读取视频超时，请检查文件是否损坏。") from error
     if result.returncode != 0:

@@ -1,36 +1,33 @@
-# 分析平台登录
+# 分析平台连接
 
-## 使用者
+在工作台右上角打开“连接分析平台”。可选择 ChatGPT 或 DeepSeek，切换时保留素材、创作提示词和视频生成参数。
 
-在工作台右上角打开“选择分析平台 / 登录”，选择 ChatGPT 或 DeepSeek 并完成浏览器授权。
-各平台账号独立保存，切换时保留素材、创作提示词和视频生成参数。
-
-| 平台 | 接入方式 | 当前状态 |
+| 平台 | 连接方式 | 用量来源 |
 | --- | --- | --- |
-| ChatGPT | 账号授权 | 使用当前账号计划额度 |
-| DeepSeek | Harness 官方账号协议，浏览器授权、S256 PKCE、本机回调 | 登录和图片/文本分析客户端已实现；实际授权需在浏览器完成 |
+| ChatGPT | 浏览器账号授权 | 当前账号计划额度 |
+| DeepSeek | 填写 API Key，保存并校验模型列表 | DeepSeek API 余额，按接口用量单独计费 |
 
-DeepSeek 模型来自官方 Harness 预置目录，不代表已逐个验证账号权限；图片分析选择 `deepseek-flash`，纯文本还可选择 `deepseek-v4-pro`。
-DeepSeek 使用平台账号余额或赠送额度，不共享 ChatGPT Pro 额度。
-账号分析不会转为 OpenAI API 密钥调用。原有可选语音转写仍需要单独的 OpenAI 接口密钥，仅用户启用时调用。
+## DeepSeek API
 
-## 本机数据与兼容
+1. 在 DeepSeek 开放平台创建自己的 API Key。
+2. 在本工具选择 DeepSeek，填入接口密钥，点击“保存并校验”。
+3. 校验只读取 `https://api.deepseek.com/models`，不调用收费推理。
+4. 图片和视频抽帧分析选择 `deepseek-flash`；`deepseek-v4-pro` 仅用于纯文本。
+5. 点击分析或优化提示词时，通过 `https://api.deepseek.com/chat/completions` 发送要求、角色图和抽帧图片，返回结构化创作方案。
 
-登录凭据由当前 Windows 用户的系统加密保存到工作室数据目录：
-ChatGPT 使用 `chatgpt_accounts.bin`，DeepSeek 使用 `deepseek_account.bin`。
-配置、历史记录和日志折叠媒体编码并隐藏凭证。分析记录保存平台、模型和用量来源；DeepSeek 返回的 token 用量随记录保存。
+DeepSeek 不使用浏览器登录授权，也不会读取浏览器 Cookie 或把网页登录凭据转换为 API Key。需要有效 API Key 和可用 API 余额。
+密钥由当前 Windows 账号加密保存为工作室数据目录中的 `deepseek_api_key.bin`；不进入普通设置、日志或分发包。切换、重启后可继续使用自己的已保存密钥。
+更换密钥验证失败或取消校验时，保留原先可用密钥。接口返回 401 时清除被拒绝的当前密钥；其他 HTTP 错误保留密钥。收费推理失败不自动重发，原提示词保留。
 
-旧配置若选中了当前不支持的平台，启动时自动切回 ChatGPT，清理不支持的平台模型设置，保留素材、提示词和生成参数。
+## 配置与用量
 
-## 验证
-
-自动检查覆盖 PKCE、错误/重复/非 ASCII state、取消后迟到的兑换响应、账号代次失效、登录网址来源、图片传递、结构解析和平台切换。
-返回结构不完整、连接中断、额度不足或账号失效都保留用户当前草稿。
-授权兑换成功后，账号资料读取返回 403、超时或其他非鉴权错误时保留授权，界面单独提示资料未同步并显示官方预置模型；这不代表已验证推理接口的可用性。资料返回 401 或鉴权失效码 40003 时，仍清除被拒绝的凭据并要求重新登录。资料同步诊断随调用记录保存，后续刷新成功会清除提示。
-这些检查使用模拟账号，不消耗模型或视频费用。真实账号授权需要使用者完成浏览器登录。
+ChatGPT 凭据保存为 `chatgpt_accounts.bin`。每位使用者配置自己的账号和密钥，历史、素材库和队列保存在各自 Windows 用户目录。
+分析记录保存实际平台、模型、连接方式和返回的 token 用量。DeepSeek API 费用与 ChatGPT 会员、Seedance 视频生成费用分别计算。
+语音转写仍默认关闭；单独开启时使用 OpenAI 接口密钥并按接口计费。
 
 ## 官方资料
 
-- [DeepSeek Harness 账号授权模块](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/credentials/deepseek-account-platform/README.zh.md)
-- [DeepSeek Harness 账号推理模块](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-deepseek-account/README.md)
-- [DeepSeek Harness 官方模型目录](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-deepseek/src/models.ts)
+- [DeepSeek API 首次调用](https://api-docs.deepseek.com/zh-cn/)
+- [图片输入](https://api-docs.deepseek.com/zh-cn/guides/vision/)
+- [JSON 输出](https://api-docs.deepseek.com/zh-cn/guides/json_mode/)
+- [模型与价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)
