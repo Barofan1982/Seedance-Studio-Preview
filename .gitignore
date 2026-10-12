@@ -1,0 +1,40 @@
+# Only application sources, documentation, tests and UI resources belong in Git.
+/*
+!/.gitignore
+!/.gitattributes
+!/*.py
+!/*.pyw
+!/*.md
+!/requirements.txt
+!/platform_defaults.json
+!/tests/
+!/resources/
+
+# Runtime files and credentials are private to each installation.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+*.bin
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.lnk
+*.pem
+*.key
+*.p12
+*.pfx
+state.json
+auth.json
+credentials.json
+
+# Local backups, screenshots, API traces and downloaded reference sources.
+/backups/
+/diagnostics/
+/previews/
+/reports/
+/build/
+/dist/
