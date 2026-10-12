@@ -103,6 +103,7 @@ python package_portable.py
 ```
 
 EXE 位于 `dist/Seedance Studio/Seedance Studio.exe`，可分发 ZIP 位于 `dist/Seedance-Studio-Preview-Windows-x64.zip`，另生成 SHA-256 校验文件。
+对外增量更新 ZIP 仅包含变动的 EXE 程序文件、必要运行组件及更新说明；本地 pyw 源码直接更新，不放入对外更新包。
 打包过程只收集程序、界面资源和运行库，不复制个人设置、密钥、素材与历史。随包保留第三方许可与源码位置说明。
 构建先输出到 `build/portable-output/`，打包完成后更新 `dist/` 的程序文件，保留已经运行后创建的用户数据。ZIP 只从空白构建目录生成。
 打包校验在移除外部 Python/FFmpeg PATH 的子进程中运行，使用临时空白资料目录，验证 1280 × 800 窗口按钮边界、中文翻译、视频编码/抽帧/播放、Windows 加密和草稿保存；另在包含中文路径的独立便携目录中运行真实启动入口，验证自动创建数据与日志、各模块目录一致、旧资料目录不会干扰启动，不调用收费接口。校验失败不会生成分发 ZIP。
