@@ -1,8 +1,6 @@
-"""Account login adapters. Platform application credentials never enter the desktop UI.
+"""DeepSeek account login and analysis through official Harness protocols.
 
-DeepSeek follows the published dsh-deepseek-account-platform and Messages protocols.
-WorkBuddy / Doubao Work use a developer-operated authorization service; that service
-owns application secrets and refresh tokens. No browser cookie extraction or API-key fallback.
+No browser cookie extraction or API-key fallback.
 """
 from __future__ import annotations
 
@@ -26,7 +24,7 @@ from pathlib import Path
 from error_diagnostics import response_snapshot, safe_text
 from secure_store import load_protected_json, save_protected_json
 
-PLATFORMS = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek", "workbuddy": "WorkBuddy", "doubao_work": "豆包工作"}
+PLATFORMS = {"chatgpt": "ChatGPT", "deepseek": "DeepSeek"}
 PLATFORM_ORIGIN = "https://platform.deepseek.com"
 INFERENCE_ORIGIN = "https://api.deepseek.com"
 # Advisory catalog from the official Harness source, not a remotely verified entitlement.
@@ -367,155 +365,10 @@ class DeepSeekSession:
         return parse_draft(text)
 
 
-class ServiceSession:
-    """OAuth broker client; sessions are bound to the publisher's exact service URL."""
-    def __init__(self, provider, file, config):
-        self.provider, self.file, self.config = provider, Path(file), config
-        self.record = load_protected_json(self.file)
-        self.cancelled = threading.Event()
-        self.lock = threading.RLock()
-        self.catalog = []
-        self.usage = {}
-
-    @property
-    def origin(self):
-        address = str(self.config.get("service_url", "")).strip().rstrip("/")
-        url = urllib.parse.urlsplit(address)
-        if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
-            raise PlatformError(f"{PLATFORMS[self.provider]} 登录暂未开通，请等待工具更新。")
-        return address
-
-    def configured(self):
-        try:
-            return bool(self.origin)
-        except PlatformError:
-            return False
-
-    def active_account(self):
-        return {"label": self.record.get("label") or PLATFORMS[self.provider]} if self.configured() and self.record.get("service_url") == self.origin and self.record.get("session_token") else None
-
-    def label(self):
-        return (self.active_account() or {}).get("label", "尚未登录" if self.configured() else "暂未开通")
-
-    def _request(self, path, *, body=None, authorized=False, timeout=30):
-        token = self.record.get("session_token", "") if authorized else ""
-        if authorized and not self.active_account():
-            raise PlatformError(f"请先登录 {PLATFORMS[self.provider]}。")
-        try:
-            result = json_request(self.origin + f"/v1/platforms/{self.provider}/" + path, body=body,
-                                  headers={"Authorization": "Bearer "+token} if token else {}, timeout=timeout,
-                                  secret_values=(token, *[str(v) for v in (body or {}).values() if isinstance(v, str)]))
-        except PlatformError as error:
-            if token and error.diagnostics.get("http_status") == 401 and self.record.get("session_token") == token:
-                self.sign_out(remote=False)
-            raise
-        if result.get("error"):
-            raise PlatformError("授权服务未完成请求。", diagnostics={"api_error_code": str(result.get("error_code", "")), "phase": "business_response"})
-        return result
-
-    def metadata(self):
-        value = self._request("metadata")
-        if value.get("provider") != self.provider or value.get("configured") is not True:
-            raise PlatformError(f"{PLATFORMS[self.provider]} 登录暂未开通，请等待工具更新。")
-        models = value.get("models")
-        if not isinstance(models, list) or not models or any(not isinstance(m, dict) or not isinstance(m.get("slug"), str) or not m["slug"] for m in models):
-            raise PlatformError("授权服务未提供可用模型。")
-        self.catalog = [{"slug": m["slug"], "display_name": str(m.get("display_name") or m["slug"]), "vision": m.get("vision") is True} for m in models]
-        return value
-
-    def models(self):
-        if not self.active_account():
-            return []
-        self.metadata()
-        self._request("account", authorized=True)
-        return list(self.catalog)
-
-    def cancel_sign_in(self):
-        with self.lock:
-            self.cancelled.set()
-
-    def sign_in(self, *, progress=None, browser=webbrowser.open, timeout=600):
-        self.cancelled.clear()
-        self.metadata()
-        verifier = secrets.token_urlsafe(32)
-        value = self._request("auth/start", body={"code_challenge": challenge(verifier), "code_challenge_method": "S256"})
-        # The broker owns the OAuth state and callback. Browser navigation starts only on its origin.
-        login_url = validated_browser_url(value.get("authorize_url", ""), self.origin)
-        attempt = value.get("attempt_id")
-        ttl = value.get("expires_in")
-        if not isinstance(attempt, str) or not attempt or not isinstance(ttl, (int, float)) or ttl <= 0:
-            raise PlatformError("登录初始化返回不完整。")
-        deadline = time.monotonic()+min(timeout, ttl)
-        if progress:
-            progress(f"请在浏览器中完成 {PLATFORMS[self.provider]} 登录授权…")
-        if not browser(login_url):
-            raise PlatformError("无法打开浏览器，请检查默认浏览器设置。")
-        committed = False
-        try:
-            while not self.cancelled.is_set() and time.monotonic() < deadline:
-                self.cancelled.wait(2)
-                if self.cancelled.is_set():
-                    break
-                result = self._request("auth/poll", body={"attempt_id": attempt, "code_verifier": verifier})
-                if result.get("status") == "pending":
-                    continue
-                if result.get("status") != "authorized" or not isinstance(result.get("session_token"), str) or not result["session_token"]:
-                    raise PlatformError("本次授权未完成，请重新登录。")
-                with self.lock:
-                    if self.cancelled.is_set() or time.monotonic() >= deadline:
-                        break
-                    record = {"service_url": self.origin, "session_token": result["session_token"], "label": str(result.get("label") or PLATFORMS[self.provider])[:150]}
-                    save_protected_json(self.file, record)
-                    self.record, committed = record, True
-                return self.label()
-            raise PlatformError("已取消登录。" if self.cancelled.is_set() else "等待登录超时，请重试。")
-        finally:
-            if not committed:
-                try:
-                    self._request("auth/cancel", body={"attempt_id": attempt, "code_verifier": verifier})
-                except PlatformError:
-                    pass
-
-    def sign_out(self, *, remote=True):
-        self.cancel_sign_in()
-        token = self.record.get("session_token", "")
-        origin = self.record.get("service_url", "")
-        self.record = {}
-        save_protected_json(self.file, {})
-        if remote and token and self.configured() and origin == self.origin:
-            def revoke():
-                try:
-                    json_request(origin+f"/v1/platforms/{self.provider}/auth/revoke", body={}, headers={"Authorization": "Bearer "+token}, secret_values=(token,))
-                except PlatformError:
-                    pass
-            threading.Thread(target=revoke, daemon=True).start()
-
-    def complete(self, request):
-        entry = next((item for item in self.catalog if item["slug"] == request["model"]), None)
-        if entry is None:
-            raise PlatformError("请先刷新平台模型列表。")
-        if not entry["vision"] and any(block.get("type") == "input_image" for m in request["input"] for block in m["content"]):
-            raise PlatformError("当前平台模型不支持图片分析，请选择支持图片的模型。")
-        # All frame bytes and the exact draft schema are forwarded; no text-only silent downgrade.
-        result = self._request("analyze", body={"request_id": str(uuid.uuid4()), "request": request}, authorized=True, timeout=300)
-        self.usage = result.get("usage") or {}
-        return parse_draft(result.get("draft"))
-
-
 class PlatformAccounts:
-    def __init__(self, directory, distribution_file=None):
+    def __init__(self, directory):
         self.directory = Path(directory)
-        file = Path(distribution_file) if distribution_file else Path(__file__).with_name("platform_defaults.json")
-        try:
-            config = json.loads(file.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            config = {}
         self.sessions = {"deepseek": DeepSeekSession(self.directory/"deepseek_account.bin")}
-        for provider in ("workbuddy", "doubao_work"):
-            # A distribution file may contain only public connection information.
-            public = config.get(provider, {}) if isinstance(config, dict) else {}
-            self.sessions[provider] = ServiceSession(provider, self.directory/(provider+"_account.bin"),
-                                                     {"service_url": public.get("service_url", "")} if isinstance(public, dict) else {})
 
     def cancel_sign_in(self):
         for session in self.sessions.values():

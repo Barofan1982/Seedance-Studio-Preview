@@ -13,7 +13,7 @@ pythonw start.pyw
 
 当前为 Python 源码版，尚未提供独立 EXE；需要 Windows、Python 和本项目依赖。视频抽帧另需 PATH 中的 FFmpeg/FFprobe。
 
-首次迁移已复制原工具的设置、加密密钥、ChatGPT 登录、素材清单、提示词和历史。右上角可选择 ChatGPT、DeepSeek、WorkBuddy 或豆包工作并登录授权；启动时刷新上次选择的平台。DeepSeek 登录和图片分析客户端已接入；WorkBuddy、豆包工作尚需开发者在工具外开通授权服务。使用者无需注册应用。接入状态、额度来源与分发契约见 [PLATFORM_LOGIN.md](PLATFORM_LOGIN.md)。
+首次迁移已复制原工具的设置、加密密钥、ChatGPT 登录、素材清单、提示词和历史。右上角可选择 ChatGPT 或 DeepSeek 并登录授权；启动时刷新上次选择的平台。DeepSeek 登录和图片分析客户端已接入，实际授权需在浏览器完成。接入状态与额度来源见 [PLATFORM_LOGIN.md](PLATFORM_LOGIN.md)。
 
 ## 界面
 
@@ -83,6 +83,4 @@ python -m unittest discover -s tests -v
 
 本项目拥有独立 Git 仓库：[Barofan1982/Seedance-Studio-Preview](https://github.com/Barofan1982/Seedance-Studio-Preview)，与上层 `youtube_downloader` 仓库分别维护。
 
-仓库保存应用源码、文档、测试、界面资源和不含密钥的发行配置。`.gitignore` 排除本地备份、诊断记录、截图、快捷方式、运行数据及凭证；`%APPDATA%\SeedanceVideoStudioPreview` 中的个人数据独立保存，不随代码上传。`backups/` 继续作为本机额外回退副本，不再是唯一回退方式。
-
-WorkBuddy 和豆包工作的 `service_url` 当前留空，界面显示“暂未开通”。启用前仍需开发者部署并验证授权服务，详见 [PLATFORM_LOGIN.md](PLATFORM_LOGIN.md)。
+仓库保存应用源码、文档、测试和界面资源。`.gitignore` 排除本地备份、诊断记录、截图、快捷方式、运行数据及凭证；`%APPDATA%\SeedanceVideoStudioPreview` 中的个人数据独立保存，不随代码上传。`backups/` 继续作为本机额外回退副本，不再是唯一回退方式。

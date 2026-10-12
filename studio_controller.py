@@ -190,7 +190,8 @@ class StudioController(QObject):
         except (OSError, ValueError):
             saved = {}
         self.state = {**DEFAULTS, **saved}
-        self.state['ai_models'] = deepcopy(saved.get('ai_models') or {})
+        self.state['ai_models'] = deepcopy({provider: model for provider, model in (saved.get('ai_models') or {}).items()
+                                           if provider in PLATFORMS and provider != 'chatgpt'})
         if self.state['ai_provider'] not in PLATFORMS:
             self.state['ai_provider'] = 'chatgpt'
         self.state["task_type"] = "参考生视频"
@@ -776,7 +777,7 @@ class StudioController(QObject):
         return self.auth.label() if self.state['ai_provider'] == 'chatgpt' else self.platform_accounts.sessions[self.state['ai_provider']].label()
 
     def analysis_model(self):
-        return self.state['openai_model'] if self.state['ai_provider'] == 'chatgpt' else self.state['ai_models'].get(self.state['ai_provider'], 'deepseek-flash' if self.state['ai_provider'] == 'deepseek' else '')
+        return self.state['openai_model'] if self.state['ai_provider'] == 'chatgpt' else self.state['ai_models'].get('deepseek', 'deepseek-flash')
 
     def set_analysis_model(self, model):
         if self.state['ai_provider'] == 'chatgpt':
@@ -819,9 +820,6 @@ class StudioController(QObject):
             return
         provider = self.state['ai_provider']
         session = self.auth if provider == 'chatgpt' else self.platform_accounts.sessions[provider]
-        if provider in {'workbuddy','doubao_work'} and not session.configured():
-            self.failed.emit(f'{PLATFORMS[provider]} 登录暂未开通，请等待工具更新。使用者无需注册应用。')
-            return
         def action():
             label = session.sign_in() if provider == 'chatgpt' else session.sign_in(progress=self._progress.emit)
             self._progress.emit(f'{PLATFORMS[provider]} 授权已回传，正在核对账号和模型…')
@@ -932,7 +930,7 @@ class StudioController(QObject):
         self.set_status("正在智能分析素材…" if not generated else "正在智能对比参考视频与成片…")
         self.start_job("refine" if generated else "draft", {
             "model": model, "provider":provider, "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'platform_account',
-            "billing_source": "ChatGPT 会员额度" if provider == 'chatgpt' else 'DeepSeek 账号余额 / 赠送额度' if provider == 'deepseek' else f'{PLATFORMS[provider]} 账号额度（平台计费）',
+            "billing_source": "ChatGPT 会员额度" if provider == 'chatgpt' else 'DeepSeek 账号余额 / 赠送额度',
             "audio_transcription": {"enabled": transcribe, "billing_source": "OpenAI 接口单独计费" if transcribe else "未启用"},
             "generation_settings": settings, "creative_brief": brief, "assets": manifest(assets),
             "previous_prompt": previous, "generated_video": str(generated) if generated else "",

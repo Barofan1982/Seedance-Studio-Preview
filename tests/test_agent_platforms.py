@@ -12,12 +12,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication, QLineEdit
-from agent_platforms import (DeepSeekSession, ServiceSession, PLATFORM_ORIGIN, INFERENCE_ORIGIN,
-                             PlatformError, challenge, parse_draft, read_messages_stream, validated_browser_url)
+from agent_platforms import (DeepSeekSession, PLATFORM_ORIGIN, INFERENCE_ORIGIN,
+                             PlatformError, challenge, parse_draft, read_messages_stream)
 from agent_prompt import AgentPromptClient
 from openai_prompt import RESPONSES_URL, _response_text
 from openai_prompt import PromptDraft
-from request_records import compact_record
 from secure_store import load_protected_json, save_protected_json
 from studio_controller import StudioController
 from platform_login_view import PlatformLoginDialog
@@ -139,35 +138,6 @@ class PlatformAuthTests(unittest.TestCase):
         with self.assertRaises(PlatformError):parse_draft({'seedance_prompt':'残缺方案'})
         self.assertEqual(parse_draft('```json\n'+json.dumps(DRAFT)+'\n```'),DRAFT)
 
-    def test_service_login_uses_pkce_and_only_opaque_session_locally(self):
-        session = ServiceSession('workbuddy',self.path/'wb.bin',{'service_url':'https://publisher.example'})
-        calls = []
-        def request(path, **kwargs):
-            calls.append((path,kwargs))
-            if path == 'metadata':return {'provider':'workbuddy','configured':True,'models':[{'slug':'assistant','vision':True}]}
-            if path == 'auth/start':return {'attempt_id':'test-attempt','authorize_url':'https://publisher.example/login','expires_in':60}
-            if path == 'auth/poll':return {'status':'authorized','session_token':'opaque-session','label':'WB账号'}
-            raise AssertionError(path)
-        with patch.object(session,'_request',side_effect=request),patch.object(session.cancelled,'wait',return_value=False):
-            self.assertEqual(session.sign_in(browser=lambda url:True),'WB账号')
-        self.assertEqual(calls[1][1]['body']['code_challenge'],challenge(calls[2][1]['body']['code_verifier']))
-        record = load_protected_json(session.file)
-        self.assertEqual(record['session_token'],'opaque-session')
-        self.assertNotIn('refresh_token',record)
-        self.assertNotIn('client_secret',record)
-        self.assertNotIn(b'opaque-session',session.file.read_bytes())
-        session.config['service_url']='https://other.example'
-        self.assertFalse(session.active_account())
-
-    def test_unconfigured_service_fails_before_any_network_or_browser(self):
-        for provider in ('workbuddy','doubao_work'):
-            session = ServiceSession(provider,self.path/(provider+'.bin'),{})
-            with patch('agent_platforms.json_request') as request,self.assertRaisesRegex(PlatformError,'暂未开通'):
-                session.sign_in(browser=Mock())
-            request.assert_not_called()
-        with self.assertRaises(PlatformError):validated_browser_url('https://evil.example/login','https://publisher.example')
-        self.assertEqual(compact_record({'client_secret':'x','session_token':'y','code_verifier':'z','token':'q'}),
-                         {'client_secret':'[已隐藏]','session_token':'[已隐藏]','code_verifier':'[已隐藏]','token':'[已隐藏]'})
 
     def test_account_adapter_never_falls_back_to_openai_paid_api(self):
         session = Mock();session.complete.return_value=DRAFT
@@ -177,17 +147,6 @@ class PlatformAuthTests(unittest.TestCase):
             self.assertEqual(json.loads(_response_text(result)),DRAFT)
         paid.assert_not_called()
 
-    def test_service_adapter_forwards_frames_schema_and_audits_returned_usage(self):
-        for provider in ('workbuddy','doubao_work'):
-            session = ServiceSession(provider,self.path/(provider+'.bin'),{'service_url':'https://publisher.example'})
-            session.record={'service_url':session.origin,'session_token':'session-token'}
-            session.catalog=[{'slug':'vision-agent','vision':True}]
-            request={'model':'vision-agent','instructions':'保留原意','input':[{'content':[{'type':'input_image','image_url':'data:image/jpeg;base64,YWJj'}]}], 'text':{'format':{'schema':{'type':'object'}}}}
-            with patch.object(session,'_request',return_value={'draft':DRAFT,'usage':{'tokens':12}}) as send:
-                self.assertEqual(session.complete(request),DRAFT)
-            self.assertEqual(send.call_args.kwargs['body']['request'],request)
-            self.assertTrue(send.call_args.kwargs['authorized'])
-            self.assertEqual(session.usage,{'tokens':12})
 
     def test_http_error_retains_status_and_redacts_credential(self):
         from agent_platforms import json_request
@@ -206,27 +165,41 @@ class PlatformUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
 
+    def test_saved_unavailable_provider_falls_back_without_losing_draft(self):
+        with tempfile.TemporaryDirectory() as directory, patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
+            saved = {'ai_provider': 'unavailable-provider',
+                     'ai_models': {'unavailable-provider': 'old-model', 'deepseek': 'deepseek-flash'},
+                     'prompt': '保留提示词', 'brief': '保留要求', 'resolution': '720p', 'duration': '8', 'ratio': '16:9'}
+            (Path(directory) / 'state.json').write_text(json.dumps(saved), encoding='utf-8')
+            auth = Mock(); auth.active_account.return_value = None; auth.label.return_value = '尚未登录'
+            controller = StudioController(Path(directory), auth=auth)
+            self.assertEqual(controller.state['ai_provider'], 'chatgpt')
+            self.assertEqual(controller.state['ai_models'], {'deepseek': 'deepseek-flash'})
+            for key in ('prompt', 'brief', 'resolution', 'duration', 'ratio'):
+                self.assertEqual(controller.state[key], saved[key])
+            self.assertEqual(set(controller.platform_accounts.sessions), {'deepseek'})
+            controller.close(); self.application.processEvents()
+            persisted = json.loads((Path(directory) / 'state.json').read_text(encoding='utf-8'))
+            self.assertEqual(persisted['ai_provider'], 'chatgpt')
+            self.assertEqual(persisted['ai_models'], {'deepseek': 'deepseek-flash'})
+
     def test_switching_and_login_dialog_preserve_draft_and_hide_registration_fields(self):
         with tempfile.TemporaryDirectory() as directory,patch('studio_controller.load_key',return_value=''),patch('studio_controller.load_openai_key',return_value=''):
             auth = Mock();auth.active_account.return_value={'email':'test@example.invalid'}
             auth.label.return_value='test@example.invalid'
+            auth.models.return_value=[{'slug':'chatgpt-model'}]
             controller = StudioController(Path(directory),auth=auth)
             controller.state.update(prompt='保留我的提示词',brief='创作要求',openai_model='chatgpt-model')
             controller.models=[{'slug':'chatgpt-model'}]
-            errors=[];controller.failed.connect(errors.append)
             dialog = PlatformLoginDialog(controller)
             dialog.show();self.application.processEvents()
-            for provider in ('deepseek','workbuddy','doubao_work'):
+            self.assertEqual([dialog.provider.itemData(i) for i in range(dialog.provider.count())], ['chatgpt','deepseek'])
+            for provider in ('deepseek','chatgpt'):
                 dialog.provider.setCurrentIndex(dialog.provider.findData(provider));self.application.processEvents()
                 self.assertEqual(controller.state['prompt'],'保留我的提示词')
                 self.assertEqual(controller.state['brief'],'创作要求')
                 self.assertEqual(controller.state['openai_model'],'chatgpt-model')
-                if provider != 'deepseek':
-                    self.assertFalse(dialog.login_button.isEnabled())
-                    with patch('agent_platforms.json_request') as network:controller.sign_in()
-                    network.assert_not_called()
             self.assertFalse(dialog.findChildren(QLineEdit))
-            self.assertIn('暂未开通',errors[-1])
             for size in ((650,460),(550,420)):
                 dialog.resize(*size);self.application.processEvents()
                 self.assertTrue(dialog.rect().contains(dialog.login_button.geometry()))

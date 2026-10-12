@@ -7,8 +7,6 @@ from studio_widgets import StudioComboBox, button, card, label
 FEES = {
     'chatgpt': '使用 ChatGPT 计划额度。',
     'deepseek': '使用 DeepSeek 账号余额或赠送额度，按平台规则计费。',
-    'workbuddy': '使用 WorkBuddy 账号额度，按平台规则计费。',
-    'doubao_work': '使用豆包工作账号额度，按平台规则计费。',
 }
 
 
@@ -93,7 +91,6 @@ class PlatformLoginDialog(QDialog):
         controller = self.controller
         provider = controller.state['ai_provider']
         active = bool(controller.analysis_account())
-        available = provider in {'chatgpt', 'deepseek'} or controller.platform_accounts.sessions[provider].configured()
         with QSignalBlocker(self.provider):
             self.provider.setCurrentIndex(self.provider.findData(provider))
         with QSignalBlocker(self.model):
@@ -104,11 +101,10 @@ class PlatformLoginDialog(QDialog):
             if index >= 0:
                 self.model.setCurrentIndex(index)
             if not controller.models:
-                self.model.addItem('登录后显示可用模型' if available else '暂未开通')
+                self.model.addItem('登录后显示可用模型')
         self.account.setText(('已连接 · ' if active else '') + controller.analysis_label())
         self.fees.setText(FEES[provider])
         self.notice.setText('请在浏览器中完成授权，完成后自动返回连接状态。' if self.login_pending else
-                            '该平台登录暂未开通，等待工具更新即可。' if not available else
                             'DeepSeek 模型来自官方预置目录，实际可用性在调用时验证。' if provider == 'deepseek' and active else '')
         self.provider.setEnabled(not controller.busy)
         self.model.setEnabled(bool(controller.models) and not controller.busy)
@@ -117,7 +113,7 @@ class PlatformLoginDialog(QDialog):
         self.logout.setEnabled(active and not controller.busy)
         self.cancel_login.setVisible(self.login_pending and provider != 'chatgpt')
         self.login_button.setText('等待浏览器授权…' if self.login_pending else '重新登录' if active else '登录授权')
-        self.login_button.setEnabled(available and not controller.busy)
+        self.login_button.setEnabled(not controller.busy)
         self.done_button.setEnabled(not self.login_pending)
 
     def login(self):

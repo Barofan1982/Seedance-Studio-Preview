@@ -6,7 +6,6 @@
 !/*.pyw
 !/*.md
 !/requirements.txt
-!/platform_defaults.json
 !/tests/
 !/resources/
 
