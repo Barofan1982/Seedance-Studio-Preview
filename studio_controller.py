@@ -32,7 +32,7 @@ from upload_library import UploadLibrary, record_status, local_copy
 from image_library import ImageLibrary, image_copy, image_status
 from generation_queue import GenerationQueue, ACTIVE as QUEUE_ACTIVE
 from reasoning_settings import EFFORT_LABELS, supported_efforts, selected_effort
-from prompt_policy import cleanup_reference, frames_for_generation, strip_analysis_references, enforce_edit_requirements, edit_requirements
+from prompt_policy import cleanup_reference, frames_for_generation, strip_analysis_references, enforce_edit_requirements, edit_requirements, logo_reference
 from workspace_snapshots import WorkspaceSnapshots, CONTENT_DEFAULTS, SNAPSHOT_KEYS, has_content
 
 from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
@@ -1027,6 +1027,7 @@ class StudioController(QObject):
         brief = prompt_for_submission(self.state)
         if self.state.get("generated_keyframe_binding"):
             brief = brief.replace(self.state["generated_keyframe_binding"], "").rstrip()
+        logo_reference(brief, assets)
         previous = self.state["prompt"].strip()
         attach_frames = frames_for_generation(self.state)
         settings = generation_settings(self.state, assets)

@@ -17,7 +17,7 @@ from pathlib import Path
 from media_assets import MediaAsset, _run_media_tool, extract_audio, sample_video_frames
 from error_diagnostics import MAX_ERROR_BYTES, response_snapshot, safe_text
 from reasoning_settings import EFFORT_LABELS
-from prompt_policy import cleanup_reference, enforce_edit_requirements
+from prompt_policy import cleanup_reference, edit_analysis_instructions, enforce_edit_requirements
 
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -342,6 +342,9 @@ class OpenAIPromptClient:
             raise ValueError("参考视频必须是本地视频文件。")
         if not competitor and not creative_brief.strip() and not any(asset.selected for asset in assets):
             raise ValueError("请选择参考视频、参考图片，或填写创作要求。")
+        # Validate edit-to-asset bindings before extracting frames or paying for analysis.
+        edit_context = edit_analysis_instructions(creative_brief, assets)
+        vision_detail = "high" if edit_context else "low"
         work_dir = Path(tempfile.mkdtemp(prefix="seedance_analysis_"))
         frame_dir: Path | None = None
         generated_frame_dir: Path | None = None
@@ -454,15 +457,7 @@ class OpenAIPromptClient:
                 text = text.replace('有候选关键帧时，在 keyframe_handles 中推荐 2–4 张覆盖开场、主要动作和叙事反馈的画面；'
                                     '结尾包含动作结果、人物互动或表情反馈时，至少选一张呈现该结尾的画面。', '')
                 text = text.replace('工具会按最终勾选结果补充。', '抽帧仅供分析。')
-            if cleanup_reference(creative_brief):
-                text += ('\n【定向替换与清理】用户要修改的是原片中指定的标识和文字。逐镜头识别旧 Logo 的位置、出现时段、'
-                         '透视与遮挡，识别字幕、水印、底部解释区。最终提示词明确写出用户指定的替换对象、对应附件和全片清除要求；'
-                         '用户要求替换 Logo 时，全片保持新 Logo 一致，不保留旧品牌；用户要求清理的字幕或说明条不得重新添加。'
-                         '不得擅自改变主体、人物外观、动作、镜头顺序或玩法。'
-                         '禁止只写“参考原视频风格”来代替这些修改要求。只删用户要求删除的文字，其他明确要求保留的内容不动。')
-                text += ('水印可能是漂浮、滚动、跨区域移动、半透明或淡入淡出的文字；观察不同时间的帧识别其轨迹和遮挡区域。'
-                         '用户要求去水印时，最终提示词明确要求全时段逐帧跟踪清除和修复覆盖区域，不仅清理固定位置，'
-                         '不能保留滚动水印、拖影或残字。抽帧未覆盖的运动不能虚构具体轨迹或精确时间点。')
+            text += edit_context
             if storyboard_images:
                 text += ('\n【图片分镜编排】以下分镜图严格按素材列表顺序编号；用户明确指定顺序或秒数时优先按用户要求：\n'
                          + '\n'.join(f'分镜 {index + 1}：{asset.handle}' for index, asset in enumerate(storyboard_images))
@@ -478,20 +473,20 @@ class OpenAIPromptClient:
                 content.append({"type": "input_text", "text":
                     f"参考视频 {frame['source_handle']} · {frame['timestamp']:.2f} 秒；候选关键帧 {frame['handle']}："})
                 content.append({"type": "input_image", "image_url": "data:image/jpeg;base64," +
-                                base64.b64encode(Path(frame["path"]).read_bytes()).decode("ascii"), "detail": "low"})
+                                base64.b64encode(Path(frame["path"]).read_bytes()).decode("ascii"), "detail": vision_detail})
             for timestamp, frame in frames:
                 content.append({"type": "input_text", "text": f"参考视频 {timestamp:.1f} 秒画面："})
                 content.append({
                     "type": "input_image",
                     "image_url": "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii"),
-                    "detail": "low",
+                    "detail": vision_detail,
                 })
             for timestamp, frame in generated_frames:
                 content.append({"type": "input_text", "text": f"上一版生成成片 {timestamp:.1f} 秒画面："})
                 content.append({
                     "type": "input_image",
                     "image_url": "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii"),
-                    "detail": "low",
+                    "detail": vision_detail,
                 })
             for index, asset in enumerate(selected_images):
                 report(f"正在准备参考图片：{index + 1}/{len(selected_images)}")
@@ -499,7 +494,7 @@ class OpenAIPromptClient:
                 content.append({
                     "type": "input_image",
                     "image_url": _scaled_jpeg_data_url(asset.path, work_dir, f"asset_{index}"),
-                    "detail": "low",
+                    "detail": vision_detail,
                 })
 
             request = {
@@ -516,6 +511,8 @@ class OpenAIPromptClient:
                     "返回中文。"
                     "优先忠实保留用户输入，避免扩写为与参考视频不同的新剧情。"
                     "最终提示词简洁可执行；详细推理不进入 seedance_prompt。"
+                    "品牌替换、字幕与水印清理是明确修改要求时，优先于保留原界面与其他文字，"
+                    "不得漏掉旧品牌清理范围和新 Logo 的附件绑定，不得与保留命令互相冲突。"
                     "将输入视频统一称为“参考视频”，使用中性表述。"
                 ),
                 "input": [{"role": "user", "content": content}],
