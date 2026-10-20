@@ -308,7 +308,7 @@ class StudioWindow(QMainWindow):
         shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         shortcut.activated.connect(self.controller.save)
         if start_services:
-            QTimer.singleShot(200, self.controller.refresh_models)
+            # Connecting an optional analysis platform must not gate video creation.
             QTimer.singleShot(900, self.controller.resume)
 
     def fit_to_screen(self):

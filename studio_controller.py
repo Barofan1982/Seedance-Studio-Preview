@@ -930,11 +930,16 @@ class StudioController(QObject):
         if self.analysis_account():
             self.refresh_models()
 
-    def refresh_models(self):
+    def refresh_models(self, success=None):
         if not self.analysis_account():
             return
         provider = self.state['ai_provider']
         session = self.auth if provider == 'chatgpt' else self.platform_accounts.sessions[provider]
+        def action():
+            models = session.models()
+            if not models:
+                raise ValueError('分析平台没有返回可用模型，请在连接设置中刷新；仍可直接生成视频。')
+            return models
         def received(models):
             self.models = models
             self.model_cache[provider] = models
@@ -944,9 +949,11 @@ class StudioController(QObject):
             self.changed.emit('models')
             self.changed.emit('account')
             self.set_status('准备就绪')
+            if callable(success):
+                success()
         self.set_status(f'正在连接 {PLATFORMS[provider]}…')
-        self.start_job('models', {'provider': provider, 'auth_mode': 'chatgpt_plan' if provider == 'chatgpt' else 'api_key'},
-                       session.models, received, failure=self._analysis_error)
+        return self.start_job('models', {'provider': provider, 'auth_mode': 'chatgpt_plan' if provider == 'chatgpt' else 'api_key'},
+                              action, received, failure=self._analysis_error)
 
     def sign_in(self):
         if self.busy:
@@ -1005,7 +1012,9 @@ class StudioController(QObject):
             raise ValueError("先在右上角登录 ChatGPT。" if provider == "chatgpt" else "先在连接窗口配置 DeepSeek API Key。")
         model = self.analysis_model()
         if model not in {m["slug"] for m in self.models}:
-            raise ValueError("账号模型列表尚未就绪，请在设置中刷新模型。")
+            # Fetch capabilities only when the user requests analysis; continue
+            # that request once, without another click or a startup dependency.
+            return self.refresh_models(success=self.analyze)
         effort = self.analysis_reasoning_effort()
         assets = [replace(a) for a in analysis_assets(self.assets)]
         selected_model = next(m for m in self.models if m['slug'] == model)
