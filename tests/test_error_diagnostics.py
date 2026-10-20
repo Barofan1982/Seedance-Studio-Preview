@@ -48,7 +48,7 @@ class ErrorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(trace['response_ids']['x-request-id'],'header-trace')
         self.assertEqual(trace['response_ids']['request_id'],'body-trace')
         self.assertTrue(trace['response_body_complete'])
-        self.assertEqual(opener.open.call_args.kwargs['timeout'],180)
+        self.assertEqual(opener.open.call_args.kwargs['timeout'],600)
         self.assertEqual(json.loads(opener.open.call_args.args[0].data),self.payload)
         self.assertEqual(opener.open.call_count,1)
         for secret in ('private-test-key','password-that-must-not-leak','secret-signature'):

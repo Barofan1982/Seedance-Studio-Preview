@@ -18,7 +18,7 @@ from direct_network import direct_handlers, BeforeSendConnectionError, CONNECT_T
 
 
 DEFAULT_BASE_URL = "http://43.153.91.218:8088/api/v3"
-CREATE_TIMEOUT_SECONDS = 180
+CREATE_TIMEOUT_SECONDS = 600
 RESOLUTIONS = ("480p", "720p", "1080p")
 RATIOS = ("16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive")
 MODES = ("reference", "first_frame", "first_last_frame", "text")

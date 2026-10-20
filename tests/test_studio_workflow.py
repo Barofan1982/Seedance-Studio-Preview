@@ -1036,7 +1036,7 @@ class StudioWorkflowTests(unittest.TestCase):
                                    'message': 'invalid duration ' + ('details ' * 800) + 'LAST-DETAIL'}}).encode()
         trace = {**response_snapshot(raw, {'x-request-id': 'trace-ui'}, 400),
                  'phase': 'http_response', 'endpoint': 'https://example.com/api/v3/contents/generations/tasks',
-                 'method': 'POST', 'timeout_seconds': 180}
+                 'method': 'POST', 'timeout_seconds': 600}
         client = Mock()
         client.create_task.side_effect = SeedanceError('接口返回 HTTP 400：参数不符合要求 dummy-key', diagnostics=trace)
         with patch.object(self.controller, 'seedance_client', return_value=client):
@@ -1044,7 +1044,7 @@ class StudioWorkflowTests(unittest.TestCase):
             self.pump_until(lambda: not self.controller.busy)
         call = self.controller.history.calls()[0]
         self.assertEqual(call['status'], 'failed')
-        self.assertEqual(json.loads(call['request_json'])['timeout_seconds'], 180)
+        self.assertEqual(json.loads(call['request_json'])['timeout_seconds'], 600)
         self.assertIn('LAST-DETAIL', call['response_json'])
         self.assertTrue(window.error_result.isVisible())
         self.assertFalse(window.dialogs)
