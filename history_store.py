@@ -78,19 +78,19 @@ class HistoryStore:
 
     def add(self, task_id: str, payload: dict, mode: str = "reference", *,
             original_prompt: str = "", assets: list[dict] | None = None, parent_task_id: str = "",
-            template: dict | None = None) -> None:
+            template: dict | None = None, initial_status: str = 'queued') -> None:
         prompt = next((item.get("text", "") for item in payload.get("content", []) if item.get("type") == "text"), "")
         with self._connect() as connection:
             connection.execute("""
                 INSERT OR IGNORE INTO tasks
                 (task_id, created_at, model, mode, task_type, resolution, ratio, output_format,
                  requested_duration, status, prompt, request_json, assets_json, original_prompt, parent_task_id, template_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task_id, int(time.time()), payload["model"], mode,
                 payload.get("omni_reference_task_type", "reference"), payload["resolution"], payload["ratio"],
                 payload.get("output_format", "mp4"),
-                payload.get("duration"), prompt,
+                payload.get("duration"), initial_status, prompt,
                 json.dumps(compact_record(payload), ensure_ascii=False),
                 json.dumps(assets or [], ensure_ascii=False), original_prompt or prompt, parent_task_id,
                 json.dumps(compact_record(template or {}), ensure_ascii=False),

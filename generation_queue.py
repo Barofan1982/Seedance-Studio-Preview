@@ -11,8 +11,9 @@ from secure_store import encode_protected_json, decode_protected_json
 from request_records import compact_record
 from error_diagnostics import safe_text
 
-ACTIVE = {'submitting', 'queued', 'running', 'saving'}
+ACTIVE = {'submitting', 'submitted', 'queued', 'running', 'saving'}
 STATUS_NAMES = {'waiting': '待提交', 'submitting': '提交中', 'queued': '服务端排队中', 'running': '生成中', 'saving': '保存中',
+                'submitted':'已接单 · 待查询状态',
                 'succeeded': '已保存', 'failed': '失败 · 队列暂停', 'unknown': '提交未确认 · 待核对',
                 'cancelled': '已移出'}
 
@@ -110,8 +111,8 @@ class GenerationQueue:
                 snapshot = self.get(row['queue_id'])['snapshot']
                 history.add(task_id, snapshot['payload'], snapshot['mode'],
                             original_prompt=snapshot['original_prompt'], assets=snapshot['assets'],
-                            parent_task_id=snapshot['parent_task_id'], template=snapshot['template'])
-                self.update(row['queue_id'], task_id=task_id, status='running')
+                            parent_task_id=snapshot['parent_task_id'], template=snapshot['template'], initial_status='submitted')
+                self.update(row['queue_id'], task_id=task_id, status='submitted')
             elif call and call['status'] == 'failed':
                 self.update(row['queue_id'], status='failed', error=call['error'])
             else:

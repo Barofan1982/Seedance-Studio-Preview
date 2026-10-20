@@ -17,6 +17,7 @@ STAGES = {
     'clear_workspace': '保存快照并清空创作', 'restore_workspace': '恢复创作快照',
 }
 PHASE_NAMES = {
+    'connecting': '建立连接（请求尚未发送）',
     'opening_connection_or_sending_request': '建立连接、发送请求或等待响应头（尚不能进一步区分）',
     'reading_response': '读取接口返回', 'parsing_response': '解析接口返回',
     'checking_task_id': '核对创建响应中的任务编号', 'http_response': '接口返回 HTTP 错误',

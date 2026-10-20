@@ -367,6 +367,17 @@ class OpenAIPromptClient:
 
             use_keyframes_for_generation = use_keyframes_for_generation and not cleanup_reference(creative_brief)
             selected_images = [asset for asset in assets if asset.selected and asset.kind == "image" and asset.path and asset.purpose != 'keyframe']
+            if len(selected_images) > 30:
+                raise ValueError('最多分析并提交 30 张原始参考图片，请减少图片；不会静默忽略后面的图片。')
+            unavailable_images = [a for a in assets if a.selected and a.kind == 'image' and not a.path]
+            if unavailable_images:
+                raise ValueError('图片网址暂不供 AI 看图，请先导入这些图片的本地文件：' + '、'.join(a.handle for a in unavailable_images))
+            storyboard_images = [a for a in selected_images if a.purpose == 'storyboard']
+            # Without a reference video, unspecified reference images can serve
+            # as storyboard panels; explicit character/scene/logo assets remain separate.
+            if not storyboard_images and not competitor and not any(a.selected and a.kind == 'video' for a in assets):
+                candidates = [a for a in selected_images if a.purpose == 'other' and 'logo' not in a.filename.lower()]
+                storyboard_images = candidates if len(candidates) >= 2 else []
             selected_assets = [asset for asset in assets if asset.selected and asset.purpose != "competitor"]
             observed_videos = {frame["source_handle"] for frame in reference_frames or []}
             asset_lines = [
@@ -431,8 +442,6 @@ class OpenAIPromptClient:
                 "duration=-1 时由模型选择时长，不承诺固定产出秒数；ratio=adaptive 时不要承诺固定画幅。"
                 "generate_audio=false 时不要求生成声音；不要把分辨率、比例等参数塞到提示词里覆盖真实设置。"
                 "画面中的文字、手部、角色一致性等约束应具体且适量。未转写的声音或抽帧间的动作不能假装已经观察到。"
-                + ("本地角色和场景图片超过 12 张，仅附上清单中的前 12 张这类图片，其他图片只有文件信息；"
-                   "此限制不适用于参考视频抽帧，视频帧全部均已提供。" if len(selected_images) > 12 else "")
                 + ("\n迭代任务：另附上一版生成成片的抽帧。先对照参考视频（若有）、用户素材与目标要求分析成片的实际问题，"
                    "逐项说明保留与修改的内容，再改写提示词。区分抽帧可见的证据和推断，不要仅复述原提示词。"
                    f"\n上一版提示词：{previous_prompt}\n成片文件：{generated_video.name}\n"
@@ -454,6 +463,16 @@ class OpenAIPromptClient:
                 text += ('水印可能是漂浮、滚动、跨区域移动、半透明或淡入淡出的文字；观察不同时间的帧识别其轨迹和遮挡区域。'
                          '用户要求去水印时，最终提示词明确要求全时段逐帧跟踪清除和修复覆盖区域，不仅清理固定位置，'
                          '不能保留滚动水印、拖影或残字。抽帧未覆盖的运动不能虚构具体轨迹或精确时间点。')
+            if storyboard_images:
+                text += ('\n【图片分镜编排】以下分镜图严格按素材列表顺序编号；用户明确指定顺序或秒数时优先按用户要求：\n'
+                         + '\n'.join(f'分镜 {index + 1}：{asset.handle}' for index, asset in enumerate(storyboard_images))
+                         + '\n逐张查看这些分镜，编排连续动作脚本。角色图、场景图和 Logo 只作为替换素材，不自动增加镜头。'
+                         'shots 必须逐镜给出 time、visual、camera、motion；每段 visual 和最终 seedance_prompt 的时间轴均引用对应完整 @{文件名}。'
+                         '固定 duration 时所有镜头从 0 秒连续覆盖至目标秒数，无重叠、无空档，最后一镜准确结束于目标时长。'
+                         '用户明确分配的各镜头秒数若与总时长冲突，列入 uncertainties 并请求调整，不能声称满足互相矛盾的时长。'
+                         'duration=-1 时给出建议节奏，明确由模型自适应，不声称已设定固定时长。'
+                         'time 使用“0-3秒”这样的起止秒数格式；完整分镜按需展开，长度按镜头数量调整，避免重复形容词。'
+                         '不要逐秒堆砌无意义动作；分镜太多无法在目标时长清晰完成时，明确提示节奏限制，仍保留每张图的对应关系。')
             content: list[dict] = [{"type": "input_text", "text": text}]
             for frame in reference_frames or []:
                 content.append({"type": "input_text", "text":
@@ -474,8 +493,8 @@ class OpenAIPromptClient:
                     "image_url": "data:image/jpeg;base64," + base64.b64encode(frame.read_bytes()).decode("ascii"),
                     "detail": "low",
                 })
-            for index, asset in enumerate(selected_images[:12]):
-                report(f"正在准备参考图片：{index + 1}/{min(12, len(selected_images))}")
+            for index, asset in enumerate(selected_images):
+                report(f"正在准备参考图片：{index + 1}/{len(selected_images)}")
                 content.append({"type": "input_text", "text": f"本地素材 {asset.handle}（{asset.purpose}）："})
                 content.append({
                     "type": "input_image",
@@ -520,6 +539,12 @@ class OpenAIPromptClient:
                 raise OpenAIError("AI 响应未完成，请减少素材或重试。")
             try:
                 data = json.loads(_response_text(response))
+                if storyboard_images:
+                    from storyboard_policy import validate_storyboard
+                    try:
+                        validate_storyboard(data, storyboard_images, generation_settings or {})
+                    except ValueError as error:
+                        raise OpenAIError(str(error)) from error
                 return PromptDraft(
                     analysis=data["analysis"],
                     shots=data["shots"],

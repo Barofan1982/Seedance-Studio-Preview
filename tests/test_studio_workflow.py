@@ -365,9 +365,9 @@ class StudioWorkflowTests(unittest.TestCase):
         self.controller.state.update(mode="全模态参考", prompt="女性角色换成 @{Sera.png}", brief="", openai_model="test-model", manual_prompt=False, auto_analyze=True)
         self.controller.models = self.auth.models.return_value
         window = self.make_window()
-        self.assertEqual(window.generate_button.text(), "先分析视频 →")
+        self.assertEqual(window.generate_button.text(), "先优化提示词 →")
         self.assertNotIn("task_type", window.controls)
-        with self.assertRaisesRegex(ValueError, "先抽帧"):
+        with self.assertRaisesRegex(ValueError, "先优化提示词"):
             collect_payload(self.controller.state, self.controller.assets)
         def draft(_competitor, assets, brief, **kwargs):
             self.assertEqual(assets[0].path, source)
@@ -475,7 +475,7 @@ class StudioWorkflowTests(unittest.TestCase):
                 self.pump_until(lambda:not self.controller.query_busy)
                 self.controller._poll.stop()
                 self.assertEqual(window.generation_feedback['phase'],2)
-            self.controller._query_failures=4
+            self.controller.pause_queries()
             window.refresh_generation()
             self.assertIn('查询暂停',window.generation_title.text())
             self.assertFalse(window.generation_canvas.timer.isActive())

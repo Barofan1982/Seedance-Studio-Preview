@@ -130,7 +130,8 @@ class MultipartVideo:
 class UploadSession:
     def __init__(self, path, *, opener=None, clock=time.time):
         self.path = Path(path)
-        self.opener = opener or urllib.request.build_opener(_NoRedirect())
+        from direct_network import direct_handlers
+        self.opener = opener or urllib.request.build_opener(*direct_handlers(), _NoRedirect())
         self.clock = clock
         self._lock = threading.RLock()
         self._account = load_protected_json(self.path)
@@ -160,7 +161,7 @@ class UploadSession:
             return {'phase':phase, 'method':'POST', 'endpoint':BASE_URL + endpoint, 'elapsed_ms':round((now-started)*1000),
                     'connect_and_send_ms':round(((sent_at if sent_at is not None else now)-started)*1000),
                     'waiting_response_ms':round(((headers_at or now)-sent_at)*1000) if sent_at is not None else None,
-                    'timeout_seconds':timeout}
+                    'timeout_seconds':timeout, 'connection_route':'直连（不使用系统代理）', 'connect_timeout_seconds':30}
         def sent():
             nonlocal sent_at, phase
             sent_at, phase = time.monotonic(), 'waiting_response'

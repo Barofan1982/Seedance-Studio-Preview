@@ -38,7 +38,7 @@ from workspace_snapshots import WorkspaceSnapshots, CONTENT_DEFAULTS, SNAPSHOT_K
 from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
 MODES = {"全模态参考": "reference", "首帧图片": "first_frame", "首尾帧图片": "first_last_frame", "纯文本": "text"}
 TASK_TYPES = {"参考生视频": "reference"}
-PURPOSE = {"competitor": "视频", "character": "角色", "scene": "场景", "first": "首帧", "last": "尾帧", "audio": "音频", "other": "参考", "keyframe": "关键帧"}
+PURPOSE = {"competitor": "视频", "character": "角色", "scene": "场景", "storyboard": "分镜图", "first": "首帧", "last": "尾帧", "audio": "音频", "other": "参考", "keyframe": "关键帧"}
 DEFAULTS = {
     "base_url": DEFAULT_BASE_URL, "mode": "全模态参考", "task_type": "参考生视频",
     "resolution": "720p", "duration": "5", "ratio": "16:9", "generate_audio": True,
@@ -117,8 +117,8 @@ def collect_payload(state: dict, assets: list[MediaAsset]) -> dict:
     if needs_video_analysis(state, assets):
         draft = state.get("prompt_draft") or {}
         if draft.get("source_assets") is not None and draft["source_assets"] != manifest(analysis_assets(assets)):
-            raise ValueError("已开启生成前自动分析，素材已变化，请重新抽帧并优化，或在更多参数关闭自动分析。")
-        raise ValueError("已开启自动分析，先抽帧并优化提示词；也可在更多参数关闭自动分析后直接生成。")
+            raise ValueError("已开启生成前自动分析，素材已变化，请重新优化提示词，或在更多参数关闭自动分析。")
+        raise ValueError("已开启自动分析，请先优化提示词；也可在更多参数关闭自动分析后直接生成。")
     if competitor and competitor.handle in original:
         raise ValueError("此视频当前仅用于分析；请在素材菜单选择“上传并用于生成”，再引用视频文件名。")
     selected = [a for a in assets if a.selected and a.purpose != "competitor"]
@@ -255,15 +255,18 @@ class StudioController(QObject):
         self.query_busy = False
         self.closed = False
         self.active_call: int | None = None
+        self.active_generation_snapshot = None
         self.query_call: int | None = None
         self.status = "准备就绪"
         self._query_failures = 0
+        self.query_paused = True
+        self.query_retry_at = None
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self.save)
         self._poll = QTimer(self)
         self._poll.setSingleShot(True)
-        self._poll.timeout.connect(self.query)
+        self._poll.timeout.connect(lambda: self.query(automatic=True))
         self._queue_timer = QTimer(self)
         self._queue_timer.setSingleShot(True)
         self._queue_timer.timeout.connect(self.dispatch_queue)
@@ -1158,8 +1161,7 @@ class StudioController(QObject):
         self.queue_enabled = True
         self.queue_reason = ''
         self.changed.emit('queue')
-        if self._query_failures > 3:
-            self._query_failures = 0
+        if self.query_paused:
             self.resume()
         self.schedule_queue()
 
@@ -1176,8 +1178,12 @@ class StudioController(QObject):
                 status = 'succeeded' if row['local_path'] and Path(row['local_path']).is_file() else 'saving'
             elif row['status'] in {'failed','cancelled','expired'}:
                 status = 'failed'
+            elif row['status'] in {'submitted','queued','running'}:
+                status = row['status'] if row['status'] in {'submitted','queued'} else 'running'
             else:
-                status = 'queued' if row['status']=='queued' else 'running'
+                status = 'unknown'
+                self.queue_enabled = False
+                self.queue_reason = '服务端状态无法识别，队列已暂停，请核对。'
             if status != item['status']:
                 self.queue.update(item['queue_id'], status=status, error=row.get('error',''))
                 changed = True
@@ -1302,6 +1308,7 @@ class StudioController(QObject):
         if pending:
             raise ValueError('已有视频任务正在排队或生成，请等待完成后再提交；当前工具不会自动排队下一条。')
         snapshot = snapshot or self.generation_snapshot(payload)
+        self.active_generation_snapshot = deepcopy(snapshot)
         if any(asset.selected and asset.upload_id and source_expired(asset) for asset in load_assets(snapshot['assets'])):
             raise ValueError('参考视频地址已过期或即将到期，不能提交，请先重新上传。')
         payload = deepcopy(snapshot['payload'])
@@ -1314,9 +1321,9 @@ class StudioController(QObject):
         def action():
             task_id = client.create_task(payload)
             if queue_id:
-                self.queue.update(queue_id,task_id=task_id,status='queued')
+                self.queue.update(queue_id,task_id=task_id,status='submitted')
             self.history.add(task_id, payload, mode, original_prompt=original, assets=assets, parent_task_id=parent,
-                             template=template)
+                             template=template, initial_status='submitted')
             return task_id
 
         def received(task_id):
@@ -1339,11 +1346,33 @@ class StudioController(QObject):
         return next((row for row in self.history.rows() if row["task_id"] == task_id), None)
 
     def pending_generation(self):
-        return next((row for row in self.history.rows() if row['status'] in {'queued', 'running'}), None)
+        return next((row for row in self.history.rows() if row['status'] in {'submitted', 'queued', 'running'}), None)
 
-    def query(self, task_id=None):
+    def pause_queries(self):
+        self.query_paused = True
+        self.query_retry_at = None
+        self._poll.stop()
+        self.changed.emit('query_schedule')
+        self.set_status('已暂停自动查询；云端任务继续，正在进行的一次查询可正常返回。')
+
+    def _schedule_query(self, seconds):
+        if self.closed or self.query_paused:
+            return
+        self.query_retry_at = time.time() + seconds
+        self._poll.start(round(seconds * 1000))
+        self.changed.emit('query_schedule')
+
+    @staticmethod
+    def query_backoff(failures):
+        return 30 if failures <= 3 else 60 if failures <= 6 else 180
+
+    def query(self, task_id=None, *, automatic=False, once=False):
         if self.closed:
             return
+        if automatic and self.query_paused:
+            return
+        if not automatic and not once:
+            self.query_paused = False
         if task_id:
             pending = self.pending_generation()
             if pending and pending['task_id'] != task_id:
@@ -1355,8 +1384,11 @@ class StudioController(QObject):
         if not task_id:
             return
         if self.busy or self.query_busy:
-            self._poll.start(1000)
+            if not once:
+                self._schedule_query(1)
             return
+        self._poll.stop()
+        self.query_retry_at = None
         try:
             client = self.seedance_client()
         except ValueError as error:
@@ -1377,13 +1409,13 @@ class StudioController(QObject):
                 self.set_status({"queued": "排队中", "running": "正在生成视频…", "succeeded": "视频生成完成",
                                  "failed": "生成失败", "cancelled": "任务已取消", "expired": "任务已过期"}.get(status, "状态待核对"))
             if status in {"running", "queued"}:
-                self._poll.start(5000)
+                self._schedule_query(5)
             elif status == "succeeded":
                 row = self.row(task_id)
                 url = (task.get("content") or {}).get("video_url") or (row["video_url"] if row else "")
                 if url:
                     if self.busy:
-                        self._poll.start(1000)
+                        self._schedule_query(1)
                     else:
                         self.download(task_id, url)
                 else:
@@ -1395,14 +1427,17 @@ class StudioController(QObject):
 
         def failure(error):
             self._query_failures += 1
-            if self._query_failures <= 3:
-                if not self.busy:
-                    self.set_status(f"查询暂未成功，稍后重试（{self._query_failures}/3）")
-                self._poll.start(5000 * self._query_failures)
-            else:
-                if not self.busy:
-                    self.set_status("查询暂停，可在成片或历史记录中继续查询")
+            status = getattr(error, 'diagnostics', {}).get('http_status')
+            if status in {400,401,403,404}:
+                self.pause_queries()
                 self.failed.emit(str(error))
+            elif self.query_paused:
+                self.set_status('本次查询失败，自动查询保持暂停，可查看错误详情。')
+            else:
+                seconds = self.query_backoff(self._query_failures)
+                self._schedule_query(seconds)
+                if not self.busy:
+                    self.set_status(f'查询连续失败 {self._query_failures} 次，{seconds} 秒后重试；不会重新提交生成。')
         def query_action():
             task = client.get_task(task_id)
             trace = getattr(client, 'last_response_diagnostics', None)
@@ -1413,11 +1448,15 @@ class StudioController(QObject):
             return task
         self.start_job("query", {"task_id": task_id}, query_action, received, task_id=task_id, failure=failure, background=True)
 
-    def resume(self):
+    def resume(self, *, automatic=False):
         if self.closed:
             return
+        if automatic and self.query_paused:
+            self.changed.emit('query_schedule')
+            return
+        self.query_paused = False
         if self.busy or self.query_busy:
-            self._poll.start(1000)
+            self._schedule_query(1)
             return
         self.sync_queue()
         queued = next((r for r in self.queue.rows() if r['status'] in QUEUE_ACTIVE and r['task_id']), None)
@@ -1430,7 +1469,7 @@ class StudioController(QObject):
         if row["status"] == "succeeded" and row["local_path"] and Path(row["local_path"]).is_file():
             self.result_ready.emit(row)
             return
-        if row["status"] in {"queued", "running", "succeeded"} and self.api_key and self.http_allowed():
+        if row["status"] in {"submitted", "queued", "running", "succeeded"} and self.api_key and self.http_allowed():
             self.query()
 
     def download(self, task_id, url=None, destination: Path | None = None):

@@ -633,7 +633,7 @@ class AssetCard(QFrame):
             menu.addAction("插入 @ 引用", lambda: mention(asset.handle)).setEnabled(not unavailable)
             if asset.kind == "image":
                 roles = menu.addMenu("素材用途")
-                for purpose in ("character", "scene", "first", "last", "other"):
+                for purpose in ("character", "scene", "storyboard", "first", "last", "other"):
                     roles.addAction(PURPOSE[purpose], lambda _checked=False, p=purpose: controller.update_asset(index, purpose=p))
             menu.addSeparator()
         menu.addAction("预览", lambda: preview(asset))
@@ -650,6 +650,7 @@ class KeyframeDialog(QDialog):
     def __init__(self, controller, preview, parent=None):
         super().__init__(parent)
         self.controller = controller
+        self.read_only = controller.busy
         self.setWindowTitle("分析画面与关键帧")
         self.resize(900, 760)
         self.setMinimumSize(740, 540)
@@ -661,7 +662,7 @@ class KeyframeDialog(QDialog):
         brief = controller.state.get('prompt','').strip() or controller.state.get('brief','')
         self.attach_frames = QCheckBox('将选中画面附加到视频生成（可选）')
         self.attach_frames.setChecked(frames_for_generation(controller.state))
-        self.attach_frames.setEnabled(not cleanup_reference(brief))
+        self.attach_frames.setEnabled(not cleanup_reference(brief) and not self.read_only)
         layout.addWidget(self.attach_frames)
         layout.addWidget(label('默认仅供 AI 分析；Logo 替换与文字清理任务不附加关键帧。', 'Muted', True))
         body = QWidget()
@@ -698,13 +699,16 @@ class KeyframeDialog(QDialog):
     def update_count(self):
         enabled = self.attach_frames.isChecked()
         for choice in self.choices.values():
-            choice.setEnabled(enabled)
+            choice.setEnabled(enabled and not self.read_only)
         count = sum(c.isChecked() for c in self.choices.values())
         self.summary.setText(f"已选 {count} 张 · 当前最多 {self.capacity} 张" if enabled else '仅供 AI 分析 · 不提交给视频生成接口')
-        self.apply_button.setText('应用关键帧' if enabled else '完成')
-        self.apply_button.setEnabled(not enabled or count <= self.capacity)
+        self.apply_button.setText('关闭 · 只读查看' if self.read_only else '应用关键帧' if enabled else '完成')
+        self.apply_button.setEnabled(self.read_only or not enabled or count <= self.capacity)
 
     def apply(self):
+        if self.read_only or self.controller.busy:
+            self.accept()
+            return
         try:
             self.controller.apply_keyframes([h for h, c in self.choices.items() if c.isChecked()] if self.attach_frames.isChecked() else [])
         except ValueError as error:

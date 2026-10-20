@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 from request_records import compact_record
 from error_diagnostics import MAX_ERROR_BYTES, error_fields, response_snapshot
+from direct_network import direct_handlers, BeforeSendConnectionError, CONNECT_TIMEOUT_SECONDS
 
 
 DEFAULT_BASE_URL = "http://43.153.91.218:8088/api/v3"
@@ -254,11 +255,12 @@ class SeedanceClient:
                 'http_status': http_status, 'response_ids': response_ids, 'timeout_seconds': timeout,
                 'elapsed_ms': round((time.monotonic() - started) * 1000),
                 'request_body_bytes': len(data) if data is not None else 0, **extra,
+                'connection_route': '直连（不使用系统代理）', 'connect_timeout_seconds': CONNECT_TIMEOUT_SECONDS,
             }, (self.api_key,))
         try:
             # The API key and JSON body must reach the configured gateway unchanged.
             # urllib otherwise inherits machine HTTP proxies, some of which rewrite POST bodies.
-            with urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoApiRedirects()).open(request, timeout=timeout) as response:
+            with urllib.request.build_opener(*direct_handlers(), _NoApiRedirects()).open(request, timeout=timeout) as response:
                 phase = "reading_response"
                 http_status = response.status
                 response_ids = {name: response.headers[name] for name in ("x-request-id", "x-tt-logid", "request-id")
@@ -297,6 +299,9 @@ class SeedanceClient:
                 error_type=type(error).__name__, reason_type=type(reason).__name__, reason=str(reason),
                 errno=getattr(reason, 'errno', None), winerror=getattr(reason, 'winerror', None),
             )
+            if isinstance(reason, BeforeSendConnectionError):
+                trace.update(phase='connecting', request_sent=False, connect_attempts=2)
+                raise SeedanceError('直连建立连接失败，已重试一次；生成请求尚未发送，可以重试。', diagnostics=trace) from error
             if getattr(error, 'partial', b''):
                 trace.update(response_snapshot(error.partial, status=http_status, secrets=(self.api_key,), complete=False))
                 trace['response_ids'] = response_ids

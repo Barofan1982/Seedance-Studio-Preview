@@ -9,6 +9,7 @@ from seedance_client import CREATE_TIMEOUT_SECONDS
 
 PHASES = ("提交", "排队", "生成", "保存")
 STATUS_NAMES = {"submitting":"提交中", "queued":"排队中", "running":"生成中", "succeeded":"已完成",
+                "submitted":"已接单 · 待查询状态",
                 "failed":"失败", "unknown":"提交未确认", "cancelled":"已取消", "expired":"已过期", "draft":"提示词版本"}
 
 
@@ -55,10 +56,13 @@ def generation_feedback(call, row, timing, samples, settings, *, operation="", p
         unknown=status=='unknown'
         result.update(title="提交未确认" if unknown else "提交失败",tone="warning",task_id="" if call and call['status'] in {'unknown','failed'} else result['task_id'],
                       detail="服务器可能已接单；请勿直接重试，先核对调用记录。" if unknown else error_text((call or {}).get('error') or (row or {}).get('error') or '请查看调用记录。')[:300])
+    elif status == 'submitted':
+        result.update(phase=0, active=not paused, tone='busy', title='已接单 · 待查询状态' + (' · 查询暂停' if paused else ''),
+                      detail='已收到任务编号，尚未取得服务端排队或生成状态。' + ('点击“继续查询”恢复。' if paused else ''))
     elif status in {'queued','running'}:
         result.update(phase=1 if status=='queued' else 2,active=True,tone="busy",
                       title="正在排队" if status=='queued' else "正在生成视频",
-                      detail="完成后将自动保存到本机。" if not paused else "自动查询已暂停，点击“继续查询”更新任务状态。")
+                      detail="服务端最近返回“" + ('排队中' if status=='queued' else '生成中') + "”；接口未提供完成百分比。" if not paused else "自动查询已暂停，点击“继续查询”更新任务状态。")
         result['estimate'],result['estimate_source']=waiting_estimate(samples,settings,elapsed)
         if paused:
             result['title']+=" · 查询暂停"
@@ -70,6 +74,6 @@ def generation_feedback(call, row, timing, samples, settings, *, operation="", p
                       detail="可播放成片，或载入模板继续修改。" if available else "服务端已生成；视频保存到本机后即可播放。")
     else:
         result.update(title=STATUS_NAMES.get(status,'状态待核对'),tone='warning',detail=error_text((row or {}).get('error') or '请查看调用记录。')[:300])
-    if result['phase']==0:
+    if call and call['status']=='running':
         result['estimate']=f"提交响应等待上限约 {CREATE_TIMEOUT_SECONDS // 60} 分钟"
     return result

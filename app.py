@@ -309,7 +309,7 @@ class StudioWindow(QMainWindow):
         shortcut.activated.connect(self.controller.save)
         if start_services:
             # Connecting an optional analysis platform must not gate video creation.
-            QTimer.singleShot(900, self.controller.resume)
+            QTimer.singleShot(900, lambda: self.controller.resume(automatic=True))
 
     def fit_to_screen(self):
         """Open centered at 80% of the available screen, respecting Windows scaling."""
@@ -563,6 +563,7 @@ class StudioWindow(QMainWindow):
         self.refine_result = button("对比优化", "Primary", "spark", self.refine_current)
         self.reedit_result = button("再编辑生成", "Soft", callback=self.reedit_current)
         self.continue_result = button("继续查询", "Quiet", callback=self.continue_generation)
+        self.query_once_button = button('立即查询一次', 'Quiet', callback=lambda: self.guarded(lambda: self.controller.query(once=True)))
         self.error_result = button("错误详情", "Soft", callback=self.show_current_error)
         self.result_layout.addWidget(self.error_result, alignment=Qt.AlignmentFlag.AlignLeft)
         for action in (self.play_result, self.open_result, self.refine_result):
@@ -570,10 +571,14 @@ class StudioWindow(QMainWindow):
         result_actions.addWidget(self.play_result)
         result_actions.addWidget(self.open_result)
         result_actions.addWidget(self.reedit_result)
-        result_actions.addWidget(self.continue_result)
         result_actions.addStretch(1)
         result_actions.addWidget(self.refine_result)
         self.result_layout.addLayout(result_actions)
+        query_actions = QHBoxLayout()
+        query_actions.addWidget(self.continue_result)
+        query_actions.addWidget(self.query_once_button)
+        query_actions.addStretch()
+        self.result_layout.addLayout(query_actions)
         self.editor_pages.addWidget(self.result_page)
         self.workbench_history = HistoryPanel(self.controller, self.load_history_record, self.show_history_record, self.play_history_record,
                                              snapshots=self.show_workspace_snapshots)
@@ -588,7 +593,7 @@ class StudioWindow(QMainWindow):
         self.job_progress.hide()
         layout.addWidget(self.job_progress)
         bottom = QHBoxLayout()
-        self.ai_button = button("智能优化提示词", "Primary", "spark", self.analyze)
+        self.ai_button = button("优化提示词", "Primary", "spark", self.analyze)
         self.ai_button.setToolTip("使用当前连接的分析平台理解参考画面并优化提示词；计费方式可在连接窗口查看。")
         bottom.addWidget(self.ai_button)
         self.mention_button = button("@ 素材", "Quiet", callback=self.mention_menu)
@@ -781,6 +786,9 @@ class StudioWindow(QMainWindow):
 
     def refresh(self, category):
         state = self.controller.state
+        if category == 'query_schedule':
+            self.refresh_generation()
+            return
         if category in {'all','queue'}:
             self.queue_panel.refresh()
             waiting = sum(r['status']=='waiting' for r in self.controller.queue.rows())
@@ -798,7 +806,7 @@ class StudioWindow(QMainWindow):
             self.prompt_changed()
             self.iteration.setText("成片对比" if state["review_output"] else "")
             self.iteration.setToolTip(f"迭代来源：{state['iteration_task_id']}" if state["iteration_task_id"] else "")
-            self.ai_button.setText("智能对比优化" if state["review_output"] else "智能优化提示词")
+            self.ai_button.setText("优化提示词")
             if category == "draft":
                 self.editor_pages.setCurrentIndex(0)
         if category in {"all", "draft", "text", "assets"}:
@@ -840,8 +848,7 @@ class StudioWindow(QMainWindow):
         elif category in {"text", "parameters", "assets"}:
             self.saved_chip.setText("草稿")
         if category in {"all", "draft", "assets", "parameters"}:
-            has_video = bool(reference_videos(self.controller.assets))
-            self.ai_button.setText("抽帧并优化" if has_video else "智能对比优化" if state["review_output"] else "智能优化提示词")
+            self.ai_button.setText("优化提示词")
             count = sum(a.selected and a.purpose == "keyframe" for a in self.controller.assets)
             self.keyframe_button.setText((f"关键帧 · {count}" if count else f"分析画面 · {len(state['frame_catalog'])}") if state["frame_catalog"] else "分析画面")
             self.keyframe_button.setEnabled(bool(state["frame_catalog"]) and not self.controller.busy)
@@ -878,7 +885,7 @@ class StudioWindow(QMainWindow):
                 self.submission_notice.hide()
                 return
             status = row["status"]
-            title = {"queued": "任务已提交 · 排队中", "running": "正在生成视频",
+            title = {"submitted":"已接单 · 待查询状态", "queued": "服务端返回：排队中", "running": "服务端返回：生成中",
                      "succeeded": "视频生成完成", "failed": "视频生成失败",
                      "cancelled": "任务已取消", "expired": "任务已过期"}.get(status, status)
             detail = f"任务编号：{row['task_id']}"
@@ -1000,8 +1007,12 @@ class StudioWindow(QMainWindow):
 
     def busy(self, value):
         self.refresh_submission()
-        for widget in (self.ai_button, self.generate_button, self.mention_button, self.keyframe_button, self.prompt, self.parameter_panel, self.refine_result, self.clear_workspace_button):
+        for widget in (self.ai_button, self.generate_button, self.mention_button, self.prompt, self.refine_result, self.clear_workspace_button):
             widget.setEnabled(not value)
+        for widget in (*self.controls.values(), self.voice):
+            widget.setEnabled(not value)
+        self.preview_button.setEnabled(True)
+        self.keyframe_button.setEnabled(bool(self.controller.state['frame_catalog']))
         self.lock_material_controls(value)
         self.saved_chip.setText("处理中" if value else "已保存")
         self.status_indicator.setText("◌" if value else "●")
@@ -1087,7 +1098,7 @@ class StudioWindow(QMainWindow):
             upload()
 
     def choose_keyframes(self):
-        if self.controller.busy or not self.controller.state["frame_catalog"]:
+        if not self.controller.state["frame_catalog"]:
             return
         self.show_dialog(KeyframeDialog(self.controller, self.preview_asset, self))
 
@@ -1104,11 +1115,20 @@ class StudioWindow(QMainWindow):
         return False
 
     def preview_request(self):
-        def action():
-            payload = collect_payload(self.controller.state, self.controller.assets)
-            self.controller.save()
-            self.show_dialog(JsonDialog("提交预览 · 尚未生成", {"request": payload, "素材映射": manifest(self.controller.assets)}, self, payload))
-        self.guarded(action)
+        try:
+            active = self.controller.active_generation_snapshot
+            operation = self.controller.history.call_summary(self.controller.active_call) if self.controller.active_call else None
+            if operation and operation['operation'] == 'create' and active:
+                payload = active['payload']
+                assets = active['assets']
+                title = '本次提交请求 · 只读'
+            else:
+                payload = collect_payload(self.controller.state, self.controller.assets)
+                assets = manifest(self.controller.assets)
+                title = '当前创作请求 · 只读，尚未生成'
+            self.show_dialog(JsonDialog(title, {"request": payload, "素材映射": assets}, self, payload))
+        except Exception as error:
+            self.show_error(str(error), call_id=False)
 
     def insert_structure(self):
         text, count = structured_prompt(self.prompt.toPlainText(), self.controller.assets, self.controller.state)
@@ -1224,6 +1244,8 @@ class StudioWindow(QMainWindow):
             purpose = None
         if purpose == "competitor":
             filters = "视频 (*.mp4 *.mov *.m4v *.webm)"
+        elif purpose == 'storyboard':
+            filters = '分镜图片 (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif)'
         files, _ = QFileDialog.getOpenFileNames(self, "导入本地素材", str(Path.home() / "Downloads"), filters)
         if files:
             self.controller.import_files(files, purpose)
@@ -1235,7 +1257,7 @@ class StudioWindow(QMainWindow):
         restore = menu.addAction('恢复上次移除的素材',lambda: self.guarded(self.controller.restore_removed_asset))
         restore.setEnabled(bool(self.controller.state.get('removed_assets')))
         menu.addSeparator()
-        for purpose in ("competitor", "character", "scene", "first", "last", "audio", "other"):
+        for purpose in ("competitor", "character", "scene", "storyboard", "first", "last", "audio", "other"):
             menu.addAction("添加" + PURPOSE[purpose], lambda _checked=False, p=purpose: self.import_files(p))
         menu.addSeparator()
         menu.addAction("导入图片文件夹", self.import_folder)
@@ -1339,7 +1361,7 @@ class StudioWindow(QMainWindow):
         else:
             settings = generation_settings(self.controller.state,self.controller.assets)
         value = generation_feedback(call,row,timing,self.waiting_samples,settings,operation=operation,
-                                    paused=self.controller._query_failures > 3)
+                                    paused=self.controller.query_paused)
         self.generation_feedback = value
         self.generation_title.setText(value['title'])
         self.generation_elapsed.setText(value['elapsed'])
@@ -1350,7 +1372,11 @@ class StudioWindow(QMainWindow):
         available = bool(row and row['local_available'] and value['phase'] == 4)
         self.result_visual.setCurrentIndex(0 if available or value['tone'] == 'idle' else 1)
         if not available:
-            self.result_info.setText(value['detail'])
+            detail = value['detail']
+            if self.controller._query_failures and not self.controller.query_paused and self.controller.query_retry_at:
+                remaining = max(0, round(self.controller.query_retry_at - time.time()))
+                detail += f'\n查询连续失败 {self.controller._query_failures} 次，下次查询约 {remaining} 秒后；仅查询，不重新生成。'
+            self.result_info.setText(detail)
         for index, step in enumerate(self.generation_steps):
             tone = 'done' if value['phase'] > index else 'current' if value['phase'] == index else 'waiting'
             step.setProperty('stage',tone)
@@ -1368,13 +1394,16 @@ class StudioWindow(QMainWindow):
         self.refine_result.setVisible(available)
         self.reedit_result.setVisible(available)
         self.reedit_result.setEnabled(available and not self.controller.busy)
-        self.continue_result.setVisible(bool(value['task_id']) and value['phase'] in {1,2,3})
-        self.continue_result.setText('保存到本机' if value['phase'] == 3 else '继续查询')
+        query_visible = bool(value['task_id']) and value['phase'] in {0,1,2,3}
+        self.continue_result.setVisible(query_visible)
+        self.query_once_button.setVisible(query_visible and value['phase'] != 3)
+        self.query_once_button.setEnabled(not self.controller.busy and not self.controller.query_busy)
+        self.continue_result.setText('保存到本机' if value['phase'] == 3 else '继续查询' if self.controller.query_paused else '暂停自动查询')
         self.continue_result.setEnabled(not self.controller.busy)
         pending = value['phase'] == 0 or bool(self.controller.pending_generation())
         waiting = any(r['status'] in {'waiting','unknown'} for r in self.controller.queue.rows())
         self.generate_button.setEnabled(not self.controller.busy)
-        self.generate_button.setText('先分析视频 →' if needs_video_analysis(self.controller.state,self.controller.assets) else
+        self.generate_button.setText('先优化提示词 →' if needs_video_analysis(self.controller.state,self.controller.assets) else
                                      '加入队列 · 付费' if pending or waiting else '生成视频 · 付费')
         self.generate_button.setToolTip('保存本条提示词、素材和参数，轮到时自动提交。' if pending or waiting else '')
         self.refine_result.setEnabled(available and not self.controller.busy)
@@ -1386,8 +1415,14 @@ class StudioWindow(QMainWindow):
 
     def continue_generation(self):
         value = self.generation_feedback
-        self.guarded(lambda:self.controller.download(value['task_id']) if value['phase'] == 3
-                     else self.controller.query(value['task_id']) if self.ensure_http() else None)
+        def action():
+            if value['phase'] == 3:
+                self.controller.download(value['task_id'])
+            elif not self.controller.query_paused:
+                self.controller.pause_queries()
+            elif self.ensure_http():
+                self.controller.resume()
+        self.guarded(action)
 
     def edit_queued(self, identity):
         self.controller.edit_queue_item(identity)
