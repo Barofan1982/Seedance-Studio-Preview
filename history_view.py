@@ -116,7 +116,7 @@ class HistoryDetailDialog(QDialog):
 
 
 class HistoryPanel(QWidget):
-    def __init__(self,controller,reuse,detail,play,parent=None):
+    def __init__(self,controller,reuse,detail,play,parent=None,*,snapshots=None):
         super().__init__(parent)
         self.controller=controller;self.reuse=reuse;self.detail=detail;self.play=play
         self.records=[]
@@ -133,7 +133,11 @@ class HistoryPanel(QWidget):
         header.addWidget(button('刷新','Quiet',callback=self.refresh))
         layout.addLayout(header)
         self.search=QLineEdit();self.search.setPlaceholderText('搜索提示词、日期或任务编号')
-        layout.addWidget(self.search)
+        search_row=QHBoxLayout();search_row.addWidget(self.search,1)
+        if snapshots:
+            self.snapshot_button=button('创作快照','Soft',callback=snapshots)
+            search_row.addWidget(self.snapshot_button)
+        layout.addLayout(search_row)
         self.summary=label('','Small',True);layout.addWidget(self.summary)
         self.body=QWidget();self.cards=QVBoxLayout(self.body);self.cards.setContentsMargins(0,0,0,0);self.cards.setSpacing(12)
         layout.addWidget(scroll(self.body),1)

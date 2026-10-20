@@ -73,6 +73,7 @@ ENUM_NAMES = {
     'create':'提交生成', 'query':'查询结果', 'download':'保存成片', 'refine':'对比优化',
     'models':'读取模型列表', 'sign_in':'连接账号', 'chatgpt_plan':'ChatGPT 会员登录',
     'upload_login':'登录上传账号', 'upload_video':'上传视频', 'restore_images':'从素材库恢复图片',
+    'clear_workspace':'保存快照并清空创作', 'restore_workspace':'恢复创作快照',
     'list':'显示', 'default':'默认', 'GET':'读取', 'POST':'提交',
     'opening_connection_or_sending_request':'建立连接或发送请求', 'reading_response':'读取响应',
     'connecting_or_sending':'连接或发送视频', 'waiting_response':'等待中转响应',

@@ -33,6 +33,7 @@ from image_library import ImageLibrary, image_copy, image_status
 from generation_queue import GenerationQueue, ACTIVE as QUEUE_ACTIVE
 from reasoning_settings import EFFORT_LABELS, supported_efforts, selected_effort
 from prompt_policy import cleanup_reference, frames_for_generation, strip_analysis_references, enforce_edit_requirements, edit_requirements
+from workspace_snapshots import WorkspaceSnapshots, CONTENT_DEFAULTS, SNAPSHOT_KEYS, has_content
 
 from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
 MODES = {"全模态参考": "reference", "首帧图片": "first_frame", "首尾帧图片": "first_last_frame", "纯文本": "text"}
@@ -233,6 +234,7 @@ class StudioController(QObject):
             self.upload_library.remember(uploaded)
         self.upload_library.save()
         self.history = history or HistoryStore(self.directory / "history.sqlite3")
+        self.workspace_snapshots = WorkspaceSnapshots(self.directory)
         self.queue = GenerationQueue(self.directory / 'generation_queue.sqlite3')
         self.queue.recover(self.history)
         self.queue_enabled = False
@@ -359,6 +361,87 @@ class StudioController(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
         return True
+
+    def workspace_has_content(self):
+        return has_content(self.state, self.assets)
+
+    def _workspace_materials(self):
+        assets = manifest(self.assets)
+        for asset in assets:
+            if asset['kind'] == 'image' and asset.get('path') and not Path(asset['path']).is_file():
+                cached = self.image_library.find_asset(asset)
+                if cached and image_copy(cached):
+                    asset['path'] = str(image_copy(cached))
+        return assets
+
+    def _replace_workspace(self, state, assets, *, analysis_current=False):
+        old_state, old_assets = deepcopy(self.state), self.assets
+        try:
+            self.state.update(deepcopy(CONTENT_DEFAULTS))
+            self.state.update({key: deepcopy(value) for key, value in state.items() if key in SNAPSHOT_KEYS})
+            self.state['removed_assets'] = []
+            self.assets = load_assets(assets)
+            self.sync_keyframe_policy()
+            if self.state.get('prompt_draft') and analysis_current:
+                self.state['prompt_draft']['source_assets'] = manifest(analysis_assets(self.assets))
+                self.state['prompt_draft']['analysis_signature'] = analysis_signature(self.assets)
+            self.save()
+        except Exception:
+            self.state, self.assets = old_state, old_assets
+            raise
+        self.changed.emit('all')
+        self.changed.emit('workspace_snapshots')
+
+    def clear_workspace(self):
+        """Called only after the UI confirms; never mutate before backup succeeds."""
+        if self.busy or self.closed:
+            raise ValueError('请等待当前导入、上传或分析操作完成，再清空创作。')
+        if not self.workspace_has_content():
+            raise ValueError('当前项目为空，无需清空。')
+        state, assets = deepcopy(self.state), self._workspace_materials()
+        analysis_current = (state.get('prompt_draft') or {}).get('analysis_signature') == analysis_signature(self.assets)
+
+        def action():
+            identity = self.workspace_snapshots.save(state, assets, progress=self._progress.emit, analysis_current=analysis_current)
+            return {'snapshot_id': identity}
+
+        def received(result):
+            try:
+                self._replace_workspace({}, [])
+            except Exception as error:
+                self.set_status('清空未完成，当前创作仍保留，恢复快照已保存。')
+                raise ValueError('清空未完成，当前创作仍保留；快照已保存：' + str(error)) from error
+            self.set_status('已保存创作快照并清空，可在“历史记录 → 创作快照”恢复。')
+
+        def failure(error):
+            self.set_status('保存未完成，当前创作未清空。')
+            self.failed.emit('保存未完成，当前创作未清空：' + str(error))
+
+        self.set_status('正在保存创作快照，保存成功后清空…')
+        return self.start_job('clear_workspace', {'asset_count': len(assets)}, action, received, failure=failure)
+
+    def restore_workspace(self, identity, success=None):
+        if self.busy or self.closed:
+            raise ValueError('请等待当前操作完成，再恢复创作。')
+        state, assets = deepcopy(self.state), self._workspace_materials()
+        analysis_current = (state.get('prompt_draft') or {}).get('analysis_signature') == analysis_signature(self.assets)
+
+        def action():
+            record = self.workspace_snapshots.get(identity)
+            warnings = self.workspace_snapshots.warnings(record, verify=True)
+            if has_content(state, assets):
+                self.workspace_snapshots.save(state, assets, reason='恢复前保存', progress=self._progress.emit, analysis_current=analysis_current)
+            return {'record': record, 'warnings': warnings}
+
+        def received(result):
+            record = result['record']
+            self._replace_workspace(record['state'], record['assets'], analysis_current=record.get('analysis_current', False))
+            self.set_status('已恢复创作快照。' + ('部分素材需重新关联或上传，请查看快照提醒。' if result['warnings'] else '可继续编辑；尚未提交生成。'))
+            if success:
+                success()
+
+        self.set_status('正在核对并恢复创作快照…')
+        return self.start_job('restore_workspace', {'snapshot_id': identity}, action, received)
 
     @Slot(object)
     def _job_finished(self, packet):

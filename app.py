@@ -38,6 +38,7 @@ from error_details_view import ErrorDetailsDialog, related_calls
 from generation_queue_view import GenerationQueuePanel
 from agent_platforms import PLATFORMS
 from platform_login_view import PlatformLoginDialog
+from workspace_snapshot_view import WorkspaceSnapshotDialog
 import time
 
 
@@ -420,6 +421,9 @@ class StudioWindow(QMainWindow):
         title.addWidget(label("参考素材", "Section"), 1)
         self.material_count = label("0", "Chip")
         title.addWidget(self.material_count)
+        self.clear_workspace_button = button('清空', 'Quiet', callback=self.clear_workspace)
+        self.clear_workspace_button.setToolTip('先保存可恢复的创作快照，再清空素材和提示词')
+        title.addWidget(self.clear_workspace_button)
         materials.addLayout(title)
         self.import_button = button("导入素材", "Soft", "plus", self.import_files)
         self.import_button.setToolTip("选择本地图片、参考视频或音频；也可以直接拖入窗口。")
@@ -571,7 +575,8 @@ class StudioWindow(QMainWindow):
         result_actions.addWidget(self.refine_result)
         self.result_layout.addLayout(result_actions)
         self.editor_pages.addWidget(self.result_page)
-        self.workbench_history = HistoryPanel(self.controller, self.load_history_record, self.show_history_record, self.play_history_record)
+        self.workbench_history = HistoryPanel(self.controller, self.load_history_record, self.show_history_record, self.play_history_record,
+                                             snapshots=self.show_workspace_snapshots)
         self.editor_pages.addWidget(self.workbench_history)
         self.queue_panel = GenerationQueuePanel(self.controller,self.edit_queued,self.show_dialog,self.show_error)
         self.editor_pages.addWidget(self.queue_panel)
@@ -675,7 +680,8 @@ class StudioWindow(QMainWindow):
         self.library_more = button("", "Icon", "more", self.library_menu)
         top.addWidget(self.library_more)
         layout.addLayout(top)
-        self.library_history = HistoryPanel(self.controller, self.load_history_record, self.show_history_record, self.play_history_record)
+        self.library_history = HistoryPanel(self.controller, self.load_history_record, self.show_history_record, self.play_history_record,
+                                           snapshots=self.show_workspace_snapshots)
         layout.addWidget(self.library_history, 1)
         return page
 
@@ -994,7 +1000,7 @@ class StudioWindow(QMainWindow):
 
     def busy(self, value):
         self.refresh_submission()
-        for widget in (self.ai_button, self.generate_button, self.mention_button, self.keyframe_button, self.prompt, self.parameter_panel, self.refine_result):
+        for widget in (self.ai_button, self.generate_button, self.mention_button, self.keyframe_button, self.prompt, self.parameter_panel, self.refine_result, self.clear_workspace_button):
             widget.setEnabled(not value)
         self.lock_material_controls(value)
         self.saved_chip.setText("处理中" if value else "已保存")
@@ -1174,6 +1180,42 @@ class StudioWindow(QMainWindow):
         self.controller.save()
         self.refresh("draft")
 
+    def clear_workspace(self):
+        if self.controller.busy:
+            return
+        if not self.controller.workspace_has_content():
+            QMessageBox.information(self, '无需清空', '当前项目为空，没有素材或提示词，无需清空。')
+            return
+        counts = '、'.join(f'{sum(a.kind == kind for a in self.controller.assets)} 个{name}'
+                          for kind, name in (('video', '视频'), ('image', '图片'), ('audio', '音频')))
+        message = (f'将保存当前提示词、{counts}（含未勾选素材）和生成参数，然后清空创作。\n\n'
+                   '本地素材会保存副本，可从“历史记录 → 创作快照”整套恢复；仅有网址的素材保留链接，到期需重新关联。\n\n'
+                   '生成参数继续沿用，正在生成的任务和待提交队列继续保留。确认保存并清空？')
+        if QMessageBox.question(self, '保存并清空当前创作', message,
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.navigate(0)
+            self.editor_pages.setCurrentIndex(0)
+            self.guarded(self.controller.clear_workspace)
+
+    def show_workspace_snapshots(self):
+        self.show_dialog(WorkspaceSnapshotDialog(self.controller, self.restore_workspace, self))
+
+    def restore_workspace(self, identity, dialog):
+        if self.controller.busy:
+            return
+        message = ('恢复素材、提示词和生成参数。当前非空创作会先另存快照，再被替换；不会自动提交生成。继续？')
+        if QMessageBox.question(dialog, '恢复创作快照', message,
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        def restored():
+            dialog.accept()
+            self.navigate(0)
+            self.editor_pages.setCurrentIndex(0)
+            self.prompt.setFocus()
+        self.guarded(lambda: self.controller.restore_workspace(identity, restored))
+
     def import_files(self, purpose=None):
         if self.controller.busy:
             return
@@ -1189,6 +1231,7 @@ class StudioWindow(QMainWindow):
     def import_menu(self):
         menu = QMenu(self)
         menu.addAction('从素材库恢复图片 / 视频',lambda: self.navigate(3))
+        menu.addAction('从创作快照恢复整套内容', self.show_workspace_snapshots)
         restore = menu.addAction('恢复上次移除的素材',lambda: self.guarded(self.controller.restore_removed_asset))
         restore.setEnabled(bool(self.controller.state.get('removed_assets')))
         menu.addSeparator()

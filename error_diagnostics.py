@@ -14,6 +14,7 @@ STAGES = {
     'create': '提交视频生成', 'query': '查询视频任务', 'generation': '云端生成视频',
     'download': '下载与保存成片', 'models': '读取分析平台模型', 'sign_in': '登录分析平台',
     'validation': '本地参数或文件校验', 'configure_api': '配置分析接口',
+    'clear_workspace': '保存快照并清空创作', 'restore_workspace': '恢复创作快照',
 }
 PHASE_NAMES = {
     'opening_connection_or_sending_request': '建立连接、发送请求或等待响应头（尚不能进一步区分）',
