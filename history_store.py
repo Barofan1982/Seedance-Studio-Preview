@@ -166,7 +166,16 @@ class HistoryStore:
         """Read submission feedback without loading media bodies or model catalogs."""
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT call_id, created_at, task_id, status, duration_ms, error FROM calls "
+                """SELECT call_id, created_at, task_id, status, duration_ms, error,
+                CASE WHEN json_valid(response_json) THEN json_object('network_diagnostics', json_object(
+                    'reason', substr(json_extract(response_json, '$.network_diagnostics.reason'), 1, 500),
+                    'reason_type', json_extract(response_json, '$.network_diagnostics.reason_type'),
+                    'error_type', json_extract(response_json, '$.network_diagnostics.error_type'),
+                    'errno', json_extract(response_json, '$.network_diagnostics.errno'),
+                    'winerror', json_extract(response_json, '$.network_diagnostics.winerror'),
+                    'timeout_seconds', json_extract(response_json, '$.network_diagnostics.timeout_seconds'),
+                    'elapsed_ms', json_extract(response_json, '$.network_diagnostics.elapsed_ms')
+                )) ELSE '{}' END AS response_json FROM calls """
                 "WHERE operation='create' ORDER BY call_id DESC LIMIT 1"
             ).fetchone()
             return dict(row) if row else None

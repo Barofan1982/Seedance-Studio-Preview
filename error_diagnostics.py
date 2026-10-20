@@ -149,15 +149,17 @@ def possible_causes(code='', message='', status=None, phase='', *, operation='',
         return ['中转或上游先达到自己的等待上限；延长本地等待时间不能改变服务端超时设置。']
     if status and status >= 500:
         return ['中转站或上游服务异常；具体处理环节需用响应编号、任务编号及时间核对后台日志。']
-    if any(s in value for s in ('timeout', 'timed out', '超时', '没有收到确认')):
-        return ['连接、传输或服务端等待耗时超过本地上限；没有收到响应头时无法判定是网络还是中转处理。',
-                '创建请求可能已被接收，需维护人员核对；不能据此判断没有扣费。']
-    if any(s in value for s in ('connection reset', 'remote end closed', 'connectionreset', 'remotedisconnected')):
+    if any(s in value for s in ('connection reset', 'remote end closed', 'connectionreset', 'remotedisconnected',
+                                '10054', '远程主机强迫关闭')):
         if endpoint.startswith('https://api.openai.com/'):
             return ['网络、代理或 OpenAI 服务提前关闭连接；没有收到响应头，不能确定由哪一端关闭。',
                     '这条记录来自 AI 分析接口；核对代理线路及平台状态，与 Seedance 中转账号无关。',
                     '分析端可能已接收请求；确认网络稳定后可手动重新优化，可能再次消耗平台额度。工具不会自动重发。']
-        return ['网络、网关或服务端提前关闭连接；需按时间和请求编号核对中转日志。']
+        return ['连接被对端或中间网络提前关闭；延长本地等待不能恢复已断开的连接。需按提交时间核查中转入口、反向代理和上游日志。',
+                '未收到任务编号时无法判断是否已接单；记录会保留，不自动重发本条，也不阻止用户发起新的生成。']
+    if any(s in value for s in ('timeout', 'timed out', '超时', '没有收到确认')):
+        return ['连接、传输或服务端等待耗时超过本地上限；没有收到响应头时无法判定是网络还是中转处理。',
+                '创建请求可能已被接收，需维护人员核对；不能据此判断没有扣费。']
     if operation == 'download':
         return ['核对成片地址是否有效、下载网络、目标目录权限和磁盘空间；云端生成结果可能仍然存在。']
     if phase in ('parsing_response', 'checking_task_id'):

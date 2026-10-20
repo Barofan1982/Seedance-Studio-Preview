@@ -142,7 +142,9 @@ class StudioWorkflowTests(unittest.TestCase):
         window = self.make_window()
         self.assertTrue(window.submission_notice.isVisible())
         self.assertIn("未收到任务编号", window.submission_title.text())
-        self.assertIn("请勿重复提交", window.submission_detail.text())
+        self.assertIn("10054", window.submission_detail.text())
+        self.assertIn("被对端或中间网络断开", window.result_info.text())
+        self.assertIn("记录已保存，可继续生成", window.submission_detail.text())
         window.close()
         restarted = self.new_controller()
         self.window = StudioWindow(restarted, start_services=False)
@@ -1034,7 +1036,7 @@ class StudioWorkflowTests(unittest.TestCase):
                                    'message': 'invalid duration ' + ('details ' * 800) + 'LAST-DETAIL'}}).encode()
         trace = {**response_snapshot(raw, {'x-request-id': 'trace-ui'}, 400),
                  'phase': 'http_response', 'endpoint': 'https://example.com/api/v3/contents/generations/tasks',
-                 'method': 'POST', 'timeout_seconds': 300}
+                 'method': 'POST', 'timeout_seconds': 180}
         client = Mock()
         client.create_task.side_effect = SeedanceError('接口返回 HTTP 400：参数不符合要求 dummy-key', diagnostics=trace)
         with patch.object(self.controller, 'seedance_client', return_value=client):
@@ -1042,9 +1044,11 @@ class StudioWorkflowTests(unittest.TestCase):
             self.pump_until(lambda: not self.controller.busy)
         call = self.controller.history.calls()[0]
         self.assertEqual(call['status'], 'failed')
-        self.assertEqual(json.loads(call['request_json'])['timeout_seconds'], 300)
+        self.assertEqual(json.loads(call['request_json'])['timeout_seconds'], 180)
         self.assertIn('LAST-DETAIL', call['response_json'])
         self.assertTrue(window.error_result.isVisible())
+        self.assertFalse(window.dialogs)
+        window.show_current_error()
         dialog = window.dialogs[-1]
         self.assertIsInstance(dialog, ErrorDetailsDialog)
         self.assertIn('InvalidParameter.TaskTypeConstraint', dialog.summary.toPlainText())
@@ -1075,6 +1079,8 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertEqual(self.controller.row()['status'], 'failed')
         call = self.controller.history.calls()[0]
         self.assertEqual(call['status'], 'succeeded')
+        self.assertFalse(window.dialogs)
+        window.show_current_error()
         dialog = window.dialogs[-1]
         self.assertIn('云端生成视频', dialog.summary.toPlainText())
         self.assertIn('查询已完成，云端生成失败', dialog.summary.toPlainText())
@@ -1157,7 +1163,7 @@ class StudioWorkflowTests(unittest.TestCase):
                 self.assertTrue(window.parameter_panel.isEnabled())
                 self.assertFalse(window.job_progress.isVisible())
                 self.assertTrue(window.generate_button.isEnabled())
-                self.assertEqual(window.generate_button.text(), '加入队列 · 付费')
+                self.assertEqual(window.generate_button.text(), '生成视频 · 付费')
                 window.prompt.setPlainText('准备下一条提示词')
                 self.controller.query()
                 self.assertEqual(client.get_task.call_count, 1)
@@ -1192,7 +1198,7 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertTrue(self.controller._poll.isActive())
         self.assertEqual(self.controller.history.calls(), [])
         self.assertTrue(window.generate_button.isEnabled())
-        self.assertEqual(window.generate_button.text(), '加入队列 · 付费')
+        self.assertEqual(window.generate_button.text(), '生成视频 · 付费')
         self.assertTrue(window.ai_button.isEnabled())
         self.controller.history.update({'id': 'active-video', 'status': 'failed'})
         window.refresh_generation()

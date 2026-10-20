@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QInputDialog, QMenu, QMessageBox, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDialog, QHBoxLayout, QInputDialog, QMenu, QTextEdit, QVBoxLayout, QWidget
 from generation_queue import ACTIVE, STATUS_NAMES
 from studio_widgets import button, card, label, scroll, JsonDialog
 from studio_controller import neutral_video_text
@@ -29,6 +29,9 @@ class GenerationQueuePanel(QWidget):
         self.toggle = button('继续队列 · 付费','Primary',callback=self.toggle_queue)
         top.addWidget(self.toggle); outer.addLayout(top)
         self.notice = label('', 'Small',True); outer.addWidget(self.notice)
+        self.show_past = QCheckBox('显示历史任务')
+        self.show_past.toggled.connect(self.refresh)
+        outer.addWidget(self.show_past)
         self.content = QWidget(); self.items = QVBoxLayout(self.content)
         self.items.setContentsMargins(0,0,3,0); self.items.setSpacing(10)
         self.area = scroll(self.content); outer.addWidget(self.area,1)
@@ -59,7 +62,11 @@ class GenerationQueuePanel(QWidget):
         self.notice.setText(self.controller.queue_reason or
                            ('按顺序生成，保存当前成片后自动提交下一条。' if self.controller.queue_enabled else
                             '每条保留加入时的提示词、素材和参数。'))
-        display = active + [r for r in rows if r['status'] == 'unknown'] + waiting + [r for r in rows if r['status'] in {'failed','succeeded','cancelled'}][::-1]
+        past = [r for r in rows if r['status'] in {'failed','succeeded','cancelled','unknown'}][::-1]
+        uncertain = sum(r['status'] == 'unknown' for r in past)
+        self.show_past.setText(f'显示历史任务（{len(past)} 条' + (f'，{uncertain} 条未收到回执）' if uncertain else '）'))
+        self.show_past.setVisible(bool(past))
+        display = active + waiting + (past if self.show_past.isChecked() else [])
         for item in display:
             identity = item['queue_id']
             panel = card(); layout = QVBoxLayout(panel)
@@ -83,7 +90,7 @@ class GenerationQueuePanel(QWidget):
                 error.setTextFormat(Qt.TextFormat.PlainText); layout.addWidget(error)
             self.items.addWidget(panel)
         if not display:
-            empty = label('尚无队列任务\n在创作页点击生成，可将当前内容加入清单。','Muted',True)
+            empty = label('暂无待处理任务\n在创作页点击“生成视频”即可开始。','Muted',True)
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter); empty.setMinimumHeight(180)
             self.items.addWidget(empty)
         self.items.addStretch()
@@ -98,17 +105,18 @@ class GenerationQueuePanel(QWidget):
         if item['call_id']:
             menu.addAction('调用与错误详情',lambda:self.show_dialog(ErrorDetailsDialog(
                 [r for r in self.controller.history.calls(limit=None) if r['call_id']==item['call_id'] or item['task_id'] and r['task_id']==item['task_id']],self)))
-        if item['status'] in {'waiting','failed'}:
+        if item['status'] == 'waiting':
             menu.addSeparator()
-            menu.addAction('移出并编辑',lambda:self.action(lambda:self.edit(identity)))
-            menu.addAction('移出队列',lambda:self.action(lambda:self.controller.remove_queue_item(identity)))
+            menu.addAction('取消排队并编辑',lambda:self.action(lambda:self.edit(identity)))
+            menu.addAction('取消这条',lambda:self.action(lambda:self.controller.remove_queue_item(identity)))
+        elif item['status'] in {'failed','succeeded','cancelled','unknown'}:
+            menu.addAction('载入再编辑',lambda:self.action(lambda:self.edit(identity)))
         if item['status'] == 'waiting':
             menu.addAction('上移',lambda:self.action(lambda:self.controller.move_queue_item(identity,-1)))
             menu.addAction('下移',lambda:self.action(lambda:self.controller.move_queue_item(identity,1)))
         if item['status'] == 'unknown':
             menu.addSeparator()
             menu.addAction('关联已接单的任务编号',lambda:self.associate(identity))
-            menu.addAction('已核对未接单 · 移出',lambda:self.clear_unknown(identity))
         if item['status'] in ACTIVE and item['task_id']:
             menu.addAction('继续查询与保存',lambda:self.action(self.controller.resume))
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
@@ -129,9 +137,3 @@ class GenerationQueuePanel(QWidget):
         value, accepted = QInputDialog.getText(self,'关联已接单的任务','填写中转站确认的任务编号：')
         if accepted:
             self.action(lambda:self.controller.attach_queue_task(identity,value))
-
-    def clear_unknown(self, identity):
-        answer = QMessageBox.question(self,'核对未接单','请先向中转站确认此请求没有创建任务。\n确认未接单后移出本条，队列不会重新提交它。',
-                                      QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-        if answer == QMessageBox.StandardButton.Yes:
-            self.action(lambda:self.controller.clear_unconfirmed_queue_item(identity))

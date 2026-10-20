@@ -27,7 +27,7 @@ def record_outcome(record: dict) -> HistoryOutcome:
     if status == 'submitted':
         return HistoryOutcome('已接单 · 待查询状态', 'info', 'progress', '已收到任务编号，尚未确认服务端排队或生成状态。')
     if status == 'unknown' or (kind == 'submission' and status == 'succeeded'):
-        description = ('未收到任务编号，是否接单及生成结果需后台核对；请先核对原提交，再决定是否重新生成。'
+        description = ('未收到任务编号，记录已保存，不影响后续生成；此条可能已接单，再次生成可能额外计费。'
                        if not record.get('task_id') else '已有任务编号，但最终结果尚未确认，需要继续查询。')
         return HistoryOutcome('提交未确认' if not record.get('task_id') else '结果待核对',
                               'warning', 'uncertain', description, error)

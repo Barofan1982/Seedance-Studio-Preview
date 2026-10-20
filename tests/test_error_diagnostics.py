@@ -48,7 +48,7 @@ class ErrorDiagnosticsTests(unittest.TestCase):
         self.assertEqual(trace['response_ids']['x-request-id'],'header-trace')
         self.assertEqual(trace['response_ids']['request_id'],'body-trace')
         self.assertTrue(trace['response_body_complete'])
-        self.assertEqual(opener.open.call_args.kwargs['timeout'],300)
+        self.assertEqual(opener.open.call_args.kwargs['timeout'],180)
         self.assertEqual(json.loads(opener.open.call_args.args[0].data),self.payload)
         self.assertEqual(opener.open.call_count,1)
         for secret in ('private-test-key','password-that-must-not-leak','secret-signature'):
@@ -92,6 +92,14 @@ class ErrorDiagnosticsTests(unittest.TestCase):
         self.assertIn('120 秒',report)
         self.assertIn('未收到 / 未记录',report)
         self.assertIn('尚未确认',report)
+
+    def test_remote_reset_is_not_explained_as_local_timeout(self):
+        call = {'operation':'create', 'status':'unknown', 'error':'创建请求没有收到确认',
+                'response_json':{'network_diagnostics':{'reason':'[WinError 10054] 远程主机强迫关闭了一个现有的连接。',
+                                                      'timeout_seconds':300, 'elapsed_ms':61000}}}
+        causes = call_details(call)['causes']
+        self.assertIn('提前关闭', causes[0])
+        self.assertNotIn('超过本地上限', ' '.join(causes))
 
 
 if __name__=='__main__': unittest.main()

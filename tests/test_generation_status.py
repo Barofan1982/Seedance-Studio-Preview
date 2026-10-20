@@ -27,9 +27,22 @@ class GenerationStatusTests(unittest.TestCase):
         value=generation_feedback(call,row,{},[],{},now=500)
         self.assertEqual(value['task_id'],'')
         self.assertEqual(value['title'],'提交未确认')
-        self.assertIn('请勿直接重试',value['detail'])
+        self.assertIn('记录已保存，可继续生成',value['detail'])
+        self.assertIn('可能额外计费',value['detail'])
         self.assertFalse(value['active'])
         self.assertEqual(value['elapsed'],'耗时 02:00')
+
+    def test_early_reset_is_visible_with_actual_old_timeout_and_no_fake_wait(self):
+        call={'status':'unknown','created_at':100,'duration_ms':61517,
+              'response_json':{'network_diagnostics':{'reason_type':'ConnectionResetError','winerror':10054,
+                                                    'timeout_seconds':300}}}
+        value=generation_feedback(call,None,{},[],{},now=500)
+        self.assertIn('62 秒',value['detail'])
+        self.assertIn('10054',value['detail'])
+        self.assertIn('300 秒',value['detail'])
+        self.assertNotIn('超时',value['detail'])
+        self.assertFalse(value['active'])
+        self.assertEqual(value['elapsed'],'耗时 01:01')
 
     def test_estimates_use_matching_local_observations_and_do_not_count_down_below_zero(self):
         samples=[{'model':'m','resolution':'480p','requested_duration':-1,'seconds':value} for value in (200,250,300)]

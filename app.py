@@ -26,7 +26,7 @@ from studio_controller import APP_DIR, MODES, TASK_TYPES, PURPOSE, StudioControl
 from studio_theme import STYLE, TOOLTIP_STYLE, icon
 from studio_widgets import AssetCard, ElideLabel, JsonDialog, KeyframeDialog, Preview, PromptEditor, StudioComboBox, VideoDialog, button, cached_thumbnail, card, label, scroll
 from video_analysis import needs_video_analysis, reference_videos
-from generation_status import PHASES, generation_feedback
+from generation_status import PHASES, generation_feedback, unconfirmed_detail
 from history_view import HistoryDetailDialog, HistoryPanel
 from ui_language import choice_text, error_text, install_chinese_translation
 from billing_cny import cny_summary, parse_cny_rates
@@ -872,9 +872,7 @@ class StudioWindow(QMainWindow):
         elif call["status"] == "unknown":
             tone = "warning"
             title = "提交未确认 · 未收到任务编号"
-            seconds = round((call["duration_ms"] or 0) / 1000)
-            detail = (f"{created} 提交，约 {seconds} 秒后连接结束（记录 #{call['call_id']}）。"
-                      "服务器是否接单需由中转后台核对；请勿重复提交。")
+            detail = f"{created} · 记录 #{call['call_id']} · " + unconfirmed_detail(call)
         elif call["status"] == "failed":
             tone = "warning"
             title = "提交失败"
@@ -1079,8 +1077,8 @@ class StudioWindow(QMainWindow):
                 payload = collect_payload(self.controller.state, self.controller.assets)
                 if self.ensure_http():
                     identity = self.controller.enqueue_generation(payload)
-                    if identity and not self.controller.busy:
-                        self.editor_pages.setCurrentIndex(4)
+                    if identity:
+                        self.editor_pages.setCurrentIndex(2)
             pending = self.controller.pending_video_uploads()
             if pending:
                 self.upload_assets(pending,success=lambda: self.guarded(submit))
@@ -1401,10 +1399,10 @@ class StudioWindow(QMainWindow):
         self.continue_result.setText('保存到本机' if value['phase'] == 3 else '继续查询' if self.controller.query_paused else '暂停自动查询')
         self.continue_result.setEnabled(not self.controller.busy)
         pending = value['phase'] == 0 or bool(self.controller.pending_generation())
-        waiting = any(r['status'] in {'waiting','unknown'} for r in self.controller.queue.rows())
+        waiting = any(r['status'] == 'waiting' for r in self.controller.queue.rows())
         self.generate_button.setEnabled(not self.controller.busy)
         self.generate_button.setText('先优化提示词 →' if needs_video_analysis(self.controller.state,self.controller.assets) else
-                                     '加入队列 · 付费' if pending or waiting else '生成视频 · 付费')
+                                     '生成视频 · 付费')
         self.generate_button.setToolTip('保存本条提示词、素材和参数，轮到时自动提交。' if pending or waiting else '')
         self.refine_result.setEnabled(available and not self.controller.busy)
         if value['active'] or value['phase'] in {1,2}:

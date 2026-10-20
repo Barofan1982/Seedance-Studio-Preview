@@ -22,7 +22,8 @@ class HistoryOutcomeTests(unittest.TestCase):
                 self.assertIn('HTTP 503', outcome.error)
         outcome = record_outcome({'record_kind': 'submission', 'status': 'succeeded', 'task_id': ''})
         self.assertEqual(outcome.category, 'uncertain')
-        self.assertIn('核对原提交', outcome.description)
+        self.assertIn('不影响后续生成', outcome.description)
+        self.assertIn('可能额外计费', outcome.description)
 
     def test_completed_tasks_require_an_existing_nonempty_file_to_show_saved(self):
         with tempfile.TemporaryDirectory() as directory:

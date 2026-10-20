@@ -1134,13 +1134,13 @@ class StudioController(QObject):
         # A click authorizes this exact payload, including media bytes, for later submission.
         snapshot = self.generation_snapshot(payload)
         self.seedance_client()
-        first = not any(r['status'] in QUEUE_ACTIVE | {'waiting','unknown'} for r in self.queue.rows())
         identity = self.queue.add(snapshot)
-        if first:
-            self.queue_enabled = True
-            self.queue_reason = ''
+        # Clicking Generate starts work; old failed/unconfirmed records never
+        # introduce a separate queue-confirmation step.
+        self.queue_enabled = True
+        self.queue_reason = ''
         self.changed.emit('queue')
-        self.set_status(f'已加入生成队列 #{identity}；'+('将按顺序自动提交' if self.queue_enabled else '队列已暂停'))
+        self.set_status('已开始处理，成片会自动保存。')
         self.schedule_queue()
         if not self.busy and not self.query_busy:
             self.dispatch_queue(automatic=False)
@@ -1156,8 +1156,6 @@ class StudioController(QObject):
         self.changed.emit('queue')
 
     def start_queue(self):
-        if any(r['status'] == 'unknown' for r in self.queue.rows()):
-            raise ValueError('队列中有提交未确认的任务，请先核对并关联任务编号，或确认服务器未接单。')
         self.queue_enabled = True
         self.queue_reason = ''
         self.changed.emit('queue')
@@ -1182,43 +1180,45 @@ class StudioController(QObject):
                 status = row['status'] if row['status'] in {'submitted','queued'} else 'running'
             else:
                 status = 'unknown'
-                self.queue_enabled = False
-                self.queue_reason = '服务端状态无法识别，队列已暂停，请核对。'
+                self.queue_reason = '有一条任务状态未确认，已保留记录；继续处理下一条。'
             if status != item['status']:
                 self.queue.update(item['queue_id'], status=status, error=row.get('error',''))
                 changed = True
                 if status == 'failed':
-                    self.queue_enabled = False
-                    self.queue_reason = f"任务 #{item['queue_id']} 失败，后续提交已暂停。"
+                    self.queue_reason = f"任务 #{item['queue_id']} 失败，记录已保留；继续处理下一条。"
         if changed:
             self.changed.emit('queue')
 
-    def queue_failure(self, identity, error, *, submission=False):
+    def queue_failure(self, identity, error, *, submission=False, pause=False):
         receipt_known = submission and bool(self.queue.get(identity)['task_id'])
         uncertain = isinstance(error, SubmissionUncertain) or receipt_known
         self.queue.fail(identity, error, uncertain=uncertain,
                         secrets=(self.api_key,self.openai_key))
-        self.queue_enabled = False
+        # A completed attempt never needs manual removal. Only local persistence
+        # failures pause subsequent work; an uncertain POST is retained, never replayed.
+        if pause or receipt_known:
+            self.queue_enabled = False
         self.queue_reason = f'任务 #{identity} '+('已接单，保存任务记录失败，请核对。' if receipt_known else
-                                               '提交未确认，请先核对。' if uncertain else '失败，后续提交已暂停。')
+                                               '未收到回执，已留档；下一条可正常生成。' if uncertain else
+                                               '保存失败，稍后可重新保存。' if pause else
+                                               '失败，已留档；下一条可正常生成。')
         self.changed.emit('queue')
         self.set_status(self.queue_reason)
-        self.failed.emit(str(error))
+        # Details remain accessible in the result/history. No modal dialog blocks
+        # the already-authorized next item.
+        self.schedule_queue()
 
     def dispatch_queue(self, *, automatic=True):
         if self.closed:
             return
         self.sync_queue()
         entries = self.queue.rows()
-        if any(r['status'] == 'unknown' for r in entries):
-            self.queue_enabled = False
-            return
         if any(r['status'] in QUEUE_ACTIVE for r in entries) or self.pending_generation() or not self.queue_enabled:
             return
         item = next((r for r in entries if r['status'] == 'waiting'), None)
         if not item:
             self.queue_enabled = False
-            self.queue_reason = '队列已完成。'
+            self.queue_reason = '暂无待处理任务；过往结果和异常已保留在历史记录。'
             self.changed.emit('queue')
             return
         if self.busy or self.query_busy:
@@ -1227,9 +1227,9 @@ class StudioController(QObject):
         try:
             snapshot = self.queue.get(item['queue_id'])['snapshot']
             if snapshot['base_url'] != self.state['base_url'].strip().rstrip('/'):
-                raise ValueError('中转连接已更改，请恢复原连接或移出任务后重新加入队列。')
+                raise ValueError('中转连接已更改，本条未发送。载入再编辑后可使用当前连接生成。')
             if any(a.selected and a.upload_id and source_expired(a) for a in load_assets(snapshot['assets'])):
-                raise ValueError('队列中的参考视频地址已过期，请移出并编辑，重新上传后加入队列。')
+                raise ValueError('参考视频地址已过期，本条未发送。载入再编辑并重新上传后可生成。')
             if not self.queue.claim(item['queue_id']):
                 return
             self.changed.emit('queue')
@@ -1250,7 +1250,10 @@ class StudioController(QObject):
         if self.busy:
             raise ValueError('当前操作完成后可载入队列任务。')
         item = self.queue.get(identity)
-        self.queue.cancel(identity)
+        if item['status'] == 'waiting':
+            self.queue.cancel(identity)
+        elif item['status'] not in {'failed','succeeded','cancelled','unknown'}:
+            raise ValueError('当前任务尚在处理中，完成后可载入再编辑。')
         self.state.update(deepcopy(item['snapshot']['state']))
         self.state['auto_analyze'] = item['snapshot']['state'].get('auto_analyze',False)
         self.assets = load_assets(item['snapshot']['assets'])
@@ -1258,18 +1261,10 @@ class StudioController(QObject):
         self.save()
         self.changed.emit('all')
         self.changed.emit('queue')
-        self.set_status('已从队列移出并载入编辑；修改后可重新加入。')
+        self.set_status('已载入创作；修改后点击生成即可，原始记录保留。')
 
     def move_queue_item(self, identity, direction):
         self.queue.move(identity,direction)
-        self.changed.emit('queue')
-
-    def clear_unconfirmed_queue_item(self, identity):
-        item = self.queue.get(identity)
-        if item['status'] != 'unknown':
-            raise ValueError('此任务已不处于待核对状态。')
-        self.queue.update(identity,status='cancelled',error='用户核对服务器未接单后移出；没有重新提交。')
-        self.queue_reason = '已移出核对项，可继续队列。'
         self.changed.emit('queue')
 
     def attach_queue_task(self, identity, task_id):
@@ -1364,7 +1359,7 @@ class StudioController(QObject):
 
     @staticmethod
     def query_backoff(failures):
-        return 30 if failures <= 3 else 60 if failures <= 6 else 180
+        return 180
 
     def query(self, task_id=None, *, automatic=False, once=False):
         if self.closed:
@@ -1421,9 +1416,9 @@ class StudioController(QObject):
                 else:
                     queued = next((r for r in self.queue.rows() if r['task_id']==task_id and r['status'] in QUEUE_ACTIVE),None)
                     if queued:
-                        self.queue_failure(queued['queue_id'],ValueError('生成状态成功，但接口未返回视频地址，队列已暂停。'))
+                        self.queue_failure(queued['queue_id'],ValueError('生成状态成功，但接口未返回视频地址，队列已暂停。'), pause=True)
             elif status == "failed":
-                self.failed.emit(str(task.get("error") or "上游生成失败，请查看调用记录。"))
+                self.set_status('本次生成失败，原因已保存在历史记录；可以继续生成。')
 
         def failure(error):
             self._query_failures += 1
@@ -1508,7 +1503,7 @@ class StudioController(QObject):
             self.set_status("视频已自动保存")
         self.set_status("正在保存成片…")
         self.start_job("download", {"video_url": url, "local_path": str(path)}, action, received, task_id=task_id,
-                       failure=(lambda error:self.queue_failure(queued['queue_id'],error)) if queued else None)
+                       failure=(lambda error:self.queue_failure(queued['queue_id'],error,pause=True)) if queued else None)
 
     def reuse(self, row, refine=False):
         payload = json.loads(row["request_json"])

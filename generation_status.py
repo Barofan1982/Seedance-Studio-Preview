@@ -6,11 +6,37 @@ import statistics
 import time
 from ui_language import error_text
 from seedance_client import CREATE_TIMEOUT_SECONDS
+from error_diagnostics import json_value
 
 PHASES = ("提交", "排队", "生成", "保存")
 STATUS_NAMES = {"submitting":"提交中", "queued":"排队中", "running":"生成中", "succeeded":"已完成",
                 "submitted":"已接单 · 待查询状态",
                 "failed":"失败", "unknown":"提交未确认", "cancelled":"已取消", "expired":"已过期", "draft":"提示词版本"}
+
+
+def unconfirmed_detail(call):
+    """Show the observed interruption, without inferring the cloud task outcome."""
+    response = json_value((call or {}).get('response_json'))
+    response = response if isinstance(response, dict) else {}
+    diag = response.get('network_diagnostics') or response.get('error_diagnostics') or {}
+    reason = ' '.join(str(diag.get(k, '')) for k in ('reason', 'error_type', 'reason_type')).lower()
+    elapsed = (call or {}).get('duration_ms')
+    if elapsed is None:
+        elapsed = diag.get('elapsed_ms')
+    when = f'约 {round(elapsed / 1000)} 秒时' if isinstance(elapsed, (int, float)) else ''
+    if diag.get('winerror') == 10054 or diag.get('errno') == 10054 or any(
+            term in reason for term in ('10054', 'connectionreset', 'connection reset', 'remotedisconnected', 'remote end closed')):
+        cause = f'连接在{when}被对端或中间网络断开'
+        if '10054' in reason or diag.get('winerror') == 10054 or diag.get('errno') == 10054:
+            cause += '（10054）'
+        cause += '。'
+        if diag.get('timeout_seconds'):
+            cause += f"本机等待上限为 {diag['timeout_seconds']} 秒。"
+    elif any(term in reason for term in ('timeout', 'timed out')):
+        cause = f'等待回执{when}超时。'
+    else:
+        cause = '未收到服务器回执。'
+    return cause + '记录已保存，可继续生成。此条可能已接单，再次生成可能额外计费。'
 
 
 def clock_text(seconds):
@@ -55,7 +81,7 @@ def generation_feedback(call, row, timing, samples, settings, *, operation="", p
     elif status in {'unknown','failed'} and (not row or call and call['status'] in {'unknown','failed'}):
         unknown=status=='unknown'
         result.update(title="提交未确认" if unknown else "提交失败",tone="warning",task_id="" if call and call['status'] in {'unknown','failed'} else result['task_id'],
-                      detail="服务器可能已接单；请勿直接重试，先核对调用记录。" if unknown else error_text((call or {}).get('error') or (row or {}).get('error') or '请查看调用记录。')[:300])
+                      detail=unconfirmed_detail(call) if unknown else error_text((call or {}).get('error') or (row or {}).get('error') or '请查看调用记录。')[:300])
     elif status == 'submitted':
         result.update(phase=0, active=not paused, tone='busy', title='已接单 · 待查询状态' + (' · 查询暂停' if paused else ''),
                       detail='已收到任务编号，尚未取得服务端排队或生成状态。' + ('点击“继续查询”恢复。' if paused else ''))
@@ -75,5 +101,5 @@ def generation_feedback(call, row, timing, samples, settings, *, operation="", p
     else:
         result.update(title=STATUS_NAMES.get(status,'状态待核对'),tone='warning',detail=error_text((row or {}).get('error') or '请查看调用记录。')[:300])
     if call and call['status']=='running':
-        result['estimate']=f"提交响应等待上限约 {CREATE_TIMEOUT_SECONDS // 60} 分钟"
+        result['estimate']=f"提交响应等待上限约 {CREATE_TIMEOUT_SECONDS // 60} 分钟；连接提前断开会及时提示"
     return result

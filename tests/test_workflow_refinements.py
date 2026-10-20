@@ -170,7 +170,7 @@ class RefinementTests(unittest.TestCase):
                 self.wait(lambda: not self.controller.query_busy)
                 self.assertFalse(self.controller.query_paused)
                 self.assertTrue(self.controller._poll.isActive())
-                expected = 30 if attempt <= 3 else 60 if attempt <= 6 else 180
+                expected = 180
                 self.assertEqual(self.controller._poll.interval(), expected * 1000)
             self.assertIn('下次查询', self.window.result_info.text())
             self.window.continue_generation()

@@ -93,29 +93,31 @@ class GenerationQueueTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.controller.remove_queue_item(identities[2])
         self.assertEqual(self.controller.queue.get(identities[0])['status'],'cancelled')
 
-    def test_uncertain_post_pauses_and_restart_never_reposts(self):
+    def test_uncertain_post_is_archived_next_item_runs_and_restart_never_reposts(self):
         snapshot=self.controller.generation_snapshot()
         first=self.controller.queue.add(snapshot)
         second=self.controller.queue.add(snapshot)
-        client=Mock();client.create_task.side_effect=SubmissionUncertain('创建连接超时')
+        client=Mock();client.create_task.side_effect=[SubmissionUncertain('创建连接超时'), 'next-task']
+        client.get_task.return_value={'id':'next-task','status':'running'}
         with patch.object(self.controller,'seedance_client',return_value=client):
             self.controller.start_queue();self.controller.dispatch_queue()
-            self.pump_until(self.idle)
+            self.pump_until(lambda:self.controller.queue.get(second)['status']=='running' and self.idle())
             self.controller.dispatch_queue()
-        self.assertEqual(client.create_task.call_count,1)
-        self.assertEqual([r['status'] for r in self.controller.queue.rows()],['unknown','waiting'])
-        self.assertFalse(self.controller.queue_enabled)
-        with self.assertRaisesRegex(ValueError,'提交未确认'):self.controller.start_queue()
+        self.assertEqual(client.create_task.call_count,2)
+        self.assertEqual([r['status'] for r in self.controller.queue.rows()],['unknown','running'])
+        self.assertTrue(self.controller.queue_enabled)
+        self.assertFalse(self.errors)
         self.controller.close()
         restarted=self.new_controller()
         try:
             with patch.object(restarted,'seedance_client',return_value=client):
-                restarted.resume();restarted.dispatch_queue()
+                restarted.resume()
+                self.pump_until(lambda:not restarted.query_busy)
+                restarted.dispatch_queue()
             self.assertFalse(restarted.queue_enabled)
-            self.assertEqual(restarted.queue.get(second)['status'],'waiting')
-            self.assertEqual(client.create_task.call_count,1)
-            restarted.clear_unconfirmed_queue_item(first)
-            self.assertEqual(restarted.queue.get(first)['status'],'cancelled')
+            self.assertEqual(restarted.queue.get(second)['status'],'running')
+            self.assertEqual(client.create_task.call_count,2)
+            self.assertEqual(restarted.queue.get(first)['status'],'unknown')
         finally:restarted.close()
 
     def test_receipt_recovery_queries_existing_task_without_replaying_post(self):
@@ -153,17 +155,22 @@ class GenerationQueueTests(unittest.TestCase):
         try:self.assertEqual(restarted.queue.get(identity)['snapshot']['payload'],payload)
         finally:restarted.close()
 
-    def test_definite_failure_and_expired_video_pause_before_next_paid_request(self):
+    def test_definite_failure_and_expired_video_are_skipped_without_removal(self):
         first=self.controller.queue.add(self.controller.generation_snapshot())
         second=self.controller.queue.add(self.controller.generation_snapshot())
-        client=Mock();client.create_task.side_effect=SeedanceError('HTTP 400 invalid duration')
+        client=Mock();client.create_task.side_effect=[SeedanceError('HTTP 400 invalid duration'),'next-task']
+        client.get_task.return_value={'id':'next-task','status':'running'}
         with patch.object(self.controller,'seedance_client',return_value=client):
-            self.controller.start_queue();self.controller.dispatch_queue();self.pump_until(self.idle)
+            self.controller.start_queue();self.controller.dispatch_queue()
+            self.pump_until(lambda:self.controller.queue.get(second)['status']=='running' and self.idle())
             self.controller.dispatch_queue()
-        self.assertEqual(client.create_task.call_count,1)
+        self.assertEqual(client.create_task.call_count,2)
         self.assertEqual(self.controller.queue.get(first)['status'],'failed')
-        self.assertEqual(self.controller.queue.get(second)['status'],'waiting')
-        self.controller.remove_queue_item(second)
+        self.assertEqual(self.controller.queue.get(second)['status'],'running')
+        self.assertFalse(self.errors)
+        self.controller._poll.stop()
+        self.controller.history.update({'id':'next-task','status':'failed'})
+        self.controller.sync_queue()
         snapshot=self.controller.generation_snapshot()
         snapshot['assets']=[{'path':'','kind':'video','purpose':'other','handle':'@{old.mp4}',
                             'source_url':'https://example.com/old.mp4','selected':True,'upload_id':'upload-old',
@@ -171,9 +178,31 @@ class GenerationQueueTests(unittest.TestCase):
         expired=self.controller.queue.add(snapshot)
         with patch.object(self.controller,'seedance_client',return_value=client):
             self.controller.start_queue();self.controller.dispatch_queue()
-        self.assertEqual(client.create_task.call_count,1)
+        self.assertEqual(client.create_task.call_count,2)
         self.assertEqual(self.controller.queue.get(expired)['status'],'failed')
         self.assertIn('过期',self.controller.queue.get(expired)['error'])
+
+    def test_one_generate_click_ignores_old_uncertain_records_and_retains_history(self):
+        window=self.make_window()
+        identity=self.controller.queue.add(self.controller.generation_snapshot())
+        self.controller.queue.update(identity,status='unknown',error='原提交未收到回执')
+        self.controller.queue_enabled=False
+        self.controller.changed.emit('queue')
+        self.assertFalse(window.queue_panel.show_past.isChecked())
+        self.assertIn('1 条未收到回执', window.queue_panel.show_past.text())
+        client=Mock();client.create_task.return_value='new-task'
+        client.get_task.return_value={'id':'new-task','status':'running'}
+        with patch.object(self.controller,'seedance_client',return_value=client):
+            window.generate()
+            self.pump_until(lambda:self.controller.row('new-task') and self.idle())
+        self.assertEqual(window.editor_pages.currentIndex(),2)
+        self.assertEqual(window.generate_button.text(),'生成视频 · 付费')
+        self.assertEqual(self.controller.queue.get(identity)['status'],'unknown')
+        self.assertFalse(self.errors)
+        client.create_task.assert_called_once()
+        window.edit_queued(identity)
+        self.assertEqual(self.controller.queue.get(identity)['status'],'unknown')
+        self.assertEqual(client.create_task.call_count,1)
 
     def test_unknown_can_associate_verified_task_without_new_generation(self):
         identity=self.controller.queue.add(self.controller.generation_snapshot())

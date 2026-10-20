@@ -14,7 +14,7 @@ from error_diagnostics import safe_text
 ACTIVE = {'submitting', 'submitted', 'queued', 'running', 'saving'}
 STATUS_NAMES = {'waiting': '待提交', 'submitting': '提交中', 'queued': '服务端排队中', 'running': '生成中', 'saving': '保存中',
                 'submitted':'已接单 · 待查询状态',
-                'succeeded': '已保存', 'failed': '失败 · 队列暂停', 'unknown': '提交未确认 · 待核对',
+                'succeeded': '已保存', 'failed': '失败 · 已留档', 'unknown': '未收到回执 · 已留档',
                 'cancelled': '已移出'}
 
 
@@ -92,9 +92,9 @@ class GenerationQueue:
 
     def cancel(self, identity):
         with self.connect() as c:
-            cursor = c.execute("UPDATE entries SET status='cancelled' WHERE queue_id=? AND status IN ('waiting','failed')", (identity,))
+            cursor = c.execute("UPDATE entries SET status='cancelled' WHERE queue_id=? AND status='waiting'", (identity,))
             if cursor.rowcount != 1:
-                raise ValueError('只能移出待提交或已失败的任务；提交未确认需要先核对。')
+                raise ValueError('只能取消尚未提交的任务；其他记录自动保留在历史中。')
 
     def recover(self, history):
         """Never replay a POST after a close or crash; use saved receipts where possible."""
