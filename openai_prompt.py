@@ -17,7 +17,7 @@ from pathlib import Path
 from media_assets import MediaAsset, _run_media_tool, extract_audio, sample_video_frames
 from error_diagnostics import MAX_ERROR_BYTES, response_snapshot, safe_text
 from reasoning_settings import EFFORT_LABELS
-from prompt_policy import cleanup_reference, edit_analysis_instructions, enforce_edit_requirements
+from prompt_policy import cleanup_reference, edit_analysis_instructions, enforce_edit_requirements, optimization_brief
 
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -342,6 +342,7 @@ class OpenAIPromptClient:
             raise ValueError("参考视频必须是本地视频文件。")
         if not competitor and not creative_brief.strip() and not any(asset.selected for asset in assets):
             raise ValueError("请选择参考视频、参考图片，或填写创作要求。")
+        creative_brief = optimization_brief(creative_brief, assets)
         # Validate edit-to-asset bindings before extracting frames or paying for analysis.
         edit_context = edit_analysis_instructions(creative_brief, assets)
         vision_detail = "high" if edit_context else "low"
@@ -458,6 +459,10 @@ class OpenAIPromptClient:
                                     '结尾包含动作结果、人物互动或表情反馈时，至少选一张呈现该结尾的画面。', '')
                 text = text.replace('工具会按最终勾选结果补充。', '抽帧仅供分析。')
             text += edit_context
+            if edit_context and direct_videos and not storyboard_images:
+                text = text.replace(
+                    '最终提示词须写出画面中有依据的核心动作和前后顺序；删除与实际视频无关的假设性玩法描述。',
+                    '已有视频提供原动作与镜头；未要求改动的部分用一句保留说明即可，不重复复述全片。')
             if storyboard_images:
                 text += ('\n【图片分镜编排】以下分镜图严格按素材列表顺序编号；用户明确指定顺序或秒数时优先按用户要求：\n'
                          + '\n'.join(f'分镜 {index + 1}：{asset.handle}' for index, asset in enumerate(storyboard_images))

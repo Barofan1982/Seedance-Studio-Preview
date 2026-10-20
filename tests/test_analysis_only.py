@@ -65,8 +65,11 @@ class AnalysisOnlyTests(unittest.TestCase):
         self.assertEqual(images[0]['image_url']['url'],image_data_url(self.logo_path))
         self.assertNotIn(image_data_url(self.frame_path),json.dumps(payload))
         self.assertFalse(payload['watermark'])
-        for term in ('所有出现镜头','字幕','水印','底部文字解释','Logo','漂浮','滚动','逐帧跟踪','全时段','拖影'):
+        for term in ('字幕','水印','底部文字解释','logo.png'):
             self.assertIn(term,self.controller.state['prompt'])
+        self.assertLess(len(self.controller.state['prompt']), 200)
+        self.assertNotIn('【优先修改要求】', self.controller.state['prompt'])
+        self.assertNotIn('逐帧跟踪', self.controller.state['prompt'])
         self.assertNotIn(self.frame.handle,self.controller.state['prompt'])
         self.assertFalse(any(a.purpose=='keyframe' for a in self.controller.assets))
         self.assertEqual(self.controller.state['frame_catalog'],self.catalog)
@@ -114,7 +117,7 @@ class AnalysisOnlyTests(unittest.TestCase):
         self.assertIn('【定向替换与清理】',content[0]['text'])
         self.assertIn('keyframe_handles 必须返回空数组',content[0]['text'])
         self.assertEqual(draft.keyframe_handles,[])
-        self.assertIn('全片去除字幕、原视频水印、底部文字解释',draft.prompt)
+        self.assertIn('去掉字幕、水印以及底部文字解释',draft.prompt)
 
     def test_requested_preserved_text_is_not_deleted_and_policy_is_idempotent(self):
         rules=edit_requirements('保留字幕，去掉水印，替换logo为 @{logo.png}')

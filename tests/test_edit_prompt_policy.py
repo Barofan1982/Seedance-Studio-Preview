@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from agent_prompt import AgentPromptClient
 from media_assets import MediaAsset
 from openai_prompt import OpenAIPromptClient
-from prompt_policy import edit_requirements, enforce_edit_requirements, frames_for_generation, logo_reference
+from prompt_policy import edit_requirements, enforce_edit_requirements, frames_for_generation, logo_reference, optimization_brief
 
 
 class EditPromptPolicyTests(unittest.TestCase):
@@ -25,13 +25,14 @@ class EditPromptPolicyTests(unittest.TestCase):
     def test_omitted_brand_names_and_logo_binding_are_restored_ahead_of_body(self):
         prompt = enforce_edit_requirements(
             '保留原 Logo。两人欢笑，手指点击领取。保持原有 UI 层级及其他界面文字。', self.brief, self.assets)
-        self.assertTrue(prompt.startswith('【优先修改要求】'))
-        header, body = prompt.split('【画面与动作】')
-        for value in ('Food Stars/FoodStars', self.logo.handle, '右下角', '淡色/半透明',
-                      '底形、描边、阴影', '所有出现镜头及转场', '不随人物运动', '不包含指定旧品牌'):
-            self.assertIn(value, header)
-        self.assertIn('两人欢笑，手指点击领取', body)
-        self.assertNotIn('保留原 Logo', body)
+        for value in ('Food Stars/FoodStars', self.logo.handle, '右下角', '淡色同品牌'):
+            self.assertIn(value, prompt)
+        self.assertIn('两人欢笑，手指点击领取', prompt)
+        self.assertNotIn('保留原 Logo', prompt)
+        self.assertIn('未指定修改的界面文字', prompt)
+        self.assertLess(len(prompt), 200)
+        for extra in ('【优先修改要求】', '逐帧', '底形、描边', '修复覆盖区域'):
+            self.assertNotIn(extra, prompt)
         self.assertNotIn('保持原人物', prompt)
         self.assertFalse(frames_for_generation({'prompt': prompt, 'use_keyframes_for_generation': True}))
 
@@ -40,7 +41,7 @@ class EditPromptPolicyTests(unittest.TestCase):
                         '招牌上的旧 Logo 替换为 @{logo.png}，保持透视'):
             with self.subTest(request=request):
                 prompt = enforce_edit_requirements('人物走动', request, self.assets)
-                self.assertIn('跟随载体', prompt)
+                self.assertIn('衣服' if '衣服' in request else '招牌', prompt)
                 self.assertNotIn('不随人物运动', prompt)
                 self.assertNotIn('右下角', prompt)
 
@@ -59,7 +60,8 @@ class EditPromptPolicyTests(unittest.TestCase):
 
     def test_remove_only_and_explicit_preservation_do_not_require_logo_image(self):
         prompt = enforce_edit_requirements('保持镜头', '去掉旧 Logo，保留字幕', [])
-        self.assertIn('不添加新的 Logo', prompt)
+        self.assertIn('去掉旧 Logo', prompt)
+        self.assertNotIn('@{', prompt)
         self.assertNotIn('全片去除字幕', prompt)
         rules = edit_requirements('不要替换 Logo，保留字幕，去掉滚动水印')
         self.assertFalse(rules['logo'])
@@ -67,14 +69,14 @@ class EditPromptPolicyTests(unittest.TestCase):
         prompt = enforce_edit_requirements('不要保留水印。保留字幕。', '不要替换 Logo，保留字幕，去掉滚动水印', [])
         self.assertIn('保留字幕', prompt)
         self.assertIn('滚动', prompt)
-        self.assertIn('逐帧跟踪', prompt)
+        self.assertNotIn('逐帧跟踪', prompt)
         self.assertNotIn('不添加新的 Logo', prompt)
         self.assertFalse(edit_requirements('用 @{logo.png} 替换人物')['logo'])
 
     def test_explicit_exception_for_other_brand_is_preserved(self):
         brief = '原 Logo 替换为 @{logo.png}，保留原品牌的赞助商标识'
         prompt = enforce_edit_requirements('保留原品牌的赞助商标识。角色挥手。', brief, self.assets)
-        self.assertIn('保留原品牌的赞助商标识', prompt.split('【画面与动作】')[1])
+        self.assertIn('保留原品牌的赞助商标识', prompt)
 
     def test_reoptimization_and_legacy_guard_do_not_duplicate_or_eat_actions(self):
         legacy = '人物欢笑，手指点击领取。\n\n【替换与清理要求】\n保持参考视频。'
@@ -86,8 +88,30 @@ class EditPromptPolicyTests(unittest.TestCase):
         self.assertLess(len(once), 650)
         legacy_only = '人物欢笑。\n\n【替换与清理要求】\n将原 Logo 在所有出现镜头中替换为 @{logo.png}。全片去除字幕。'
         migrated = enforce_edit_requirements(legacy_only, legacy_only, self.assets)
-        self.assertIn('指定修改：', migrated)
+        self.assertIn('全片去除字幕', migrated)
         self.assertEqual(enforce_edit_requirements(migrated, migrated, self.assets), migrated)
+
+    def test_complete_short_prompt_is_not_expanded(self):
+        short = '把 @{替换.mp4} 左右人物换成 @{参考图.png} 对应人物。右下角原 Logo 替换为 @{logo.png}，去掉滚动水印，保留字幕。其余动作和界面不变。'
+        self.assertEqual(enforce_edit_requirements(short, short, self.assets), short)
+        brief = '右下角统一替换为 @{logo.png}'
+        self.assertEqual(enforce_edit_requirements('右下角 Logo 换成 @{logo.png}', brief, self.assets), '右下角 Logo 换成 @{logo.png}')
+
+    def test_retired_header_is_not_sent_to_analysis_and_real_requests_survive(self):
+        old = ('【优先修改要求】\n指定修改：全片清除 FoodStars 标识；右下角统一替换为 @{logo.png}\n'
+               '所有出现镜头及转场先清除底形描边阴影，再修复背景。\n\n【画面与动作】\n'
+               '以 @{参考图.png} 替换 @{替换.mp4} 的人物，保留镜头。')
+        cleaned = optimization_brief(old, self.assets)
+        for value in ('FoodStars', '右下角', self.logo.handle, self.character.handle, self.video.handle):
+            self.assertIn(value, cleaned)
+        self.assertNotIn('描边阴影', cleaned)
+        self.assertNotIn('【优先修改要求】', cleaned)
+        self.assertLess(len(cleaned), 160)
+        old_using = old.replace('以 @{参考图.png} 替换 @{替换.mp4} 的人物，保留镜头。',
+                                '以 @{参考图.png} 替换人物，右下角统一使用 @{logo.png}。')
+        cleaned_using = optimization_brief(old_using, self.assets)
+        self.assertTrue(edit_requirements(cleaned_using)['logo'])
+        self.assertEqual(logo_reference(cleaned_using, self.assets), self.logo)
 
     def test_both_ai_transports_receive_same_policy_and_return_guarded_prompt(self):
         data = {'analysis': '保留活动流程', 'shots': [], 'seedance_prompt': '两人欢笑，点击领取。',
@@ -104,11 +128,12 @@ class EditPromptPolicyTests(unittest.TestCase):
                     content = request['input'][0]['content']
                     self.assertIn('已核对新 Logo 附件：' + self.logo.handle, content[0]['text'])
                     self.assertIn('人物衣服、背景', content[0]['text'])
-                    self.assertIn('【工具固定前置约束】', content[0]['text'])
-                    self.assertIn('不重复照抄工具的通用清理条款', content[0]['text'])
+                    self.assertNotIn('【工具固定前置约束】', content[0]['text'])
+                    self.assertIn('通常 80–180 字', content[0]['text'])
+                    self.assertIn('同一条替换或清理要求只写一次', content[0]['text'])
                     self.assertIn('不得漏掉旧品牌清理范围', request['instructions'])
                     self.assertTrue(all(c['detail'] == 'high' for c in content if c['type'] == 'input_image'))
-                    self.assertTrue(draft.prompt.startswith('【优先修改要求】'))
+                    self.assertNotIn('【优先修改要求】', draft.prompt)
                     self.assertIn('Food Stars/FoodStars', draft.prompt)
                     self.assertEqual(draft.keyframe_handles, [])
 

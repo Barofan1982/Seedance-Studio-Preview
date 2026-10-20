@@ -157,23 +157,21 @@ def edit_analysis_instructions(brief, assets):
     target = logo_reference(brief, assets)
     binding = f'\n已核对新 Logo 附件：{target.handle}。' if target else ''
     return (
-        '\n【定向替换与清理】修改优先级高于沿用原片、保留 UI 和保留其他文字；'
-        '先区分必须替换、必须删除、明确保留三类，不得用“其他文字不变”覆盖指定品牌清理。'
-        '工具会将已核对的品牌替换与文字清理前置到最终提示词首段，'
-        'seedance_prompt 编写角色、动作、镜头和保留的界面，并补充从画面确认的具体品牌拼写与定位，'
-        '不重复照抄工具的通用清理条款。'
-        '逐帧观察旧品牌的准确拼写、大小写变体、位置及淡色副本，尤其检查人物衣服、背景、'
-        '四角与弹窗前后；能看清的品牌名称写进最终提示词，看不清时只描述位置和外观，不编造拼写。'
-        '替换旧品牌包括其文字、底形、描边、阴影和同品牌半透明字样，禁止新旧叠加。'
-        '区分固定屏幕 Logo 与衣服、招牌等场景内 Logo：前者固定屏幕坐标与大小，'
-        '后者跟随载体透视和运动；没有用户要求或画面证据时不要假定右下角、固定位置或透明背景。'
-        '水印可能漂浮、滚动、移动、半透明或淡入淡出，要求全时段跟踪清理覆盖区域；'
-        '未观察到的轨迹与精确时间不虚构。只清除用户指定范围，明确保留的字幕、说明、其他品牌不删。'
-        '品牌替换之外仍执行用户的角色、场景与动作修改，不把“保持原片人物”写成冲突约束。'
-        '最终自查：旧品牌清理范围、新 Logo 的完整 @ 引用、位置及运动方式、'
-        '保留文字的例外是否一致；不得漏掉明确要求，也不要重复堆叠同义禁令。'
+        '\n【定向替换与清理】针对已有视频，优先写简短的修改说明：操作对象、从 A 改成 B、'
+        '需要删除的内容、保持不变的范围。简单角色/Logo 替换通常 80–180 字，'
+        '用户有复杂时序、数量、分镜要求时按需展开，不为字数删掉明确要求。'
+        '原视频已经提供动作和镜头，不再逐项复述原片剧情，也不另外编排未要求修改的动作。'
+        '同一条替换或清理要求只写一次，不输出“最高优先级”“指定修改”等重复模板。'
+        '不把内部检查步骤写成生成指令，不添加逐帧修补、底形描边阴影逐项去除、'
+        '转场覆盖等用户没有提出的操作流程。用户只要求替换 Logo 时，一句 A 替换为对应图片即可。'
+        '实际查看人物衣服、背景与角落中的品牌：看得清的名称可用于准确定位，'
+        '看不清时不编造拼写。用户明确要求清除同品牌淡字或滚动水印时简短写出该范围。'
+        '用户给出位置/载体时照实保留，不自动假设右下角、固定坐标、透视运动或透明背景。'
+        '保留要求不包含用户明确指定替换或删除的对象；明确要保留的字幕、说明及其他品牌不删除。'
+        '角色和 Logo 的图片分别绑定，不遗漏用户的角色对应关系。'
+        '最终自查附件引用、旧品牌名称、删除范围及保留例外；正确完整的短提示词直接返回，'
+        '工具只补缺失要求，不再追加整段通用清理条款。'
         + binding
-        + '\n【工具固定前置约束】\n' + enforce_edit_requirements('', brief, assets).split('\n\n' + _BODY + '\n', 1)[0]
     )
 
 
@@ -204,31 +202,53 @@ def _remove_conflicts(prompt, rules, brief):
     return ''.join(parts).strip()
 
 
+def _compact(text):
+    return re.sub(r'[\s，,。；;：:、/]', '', text).casefold()
+
+
+def _covered_edit(clause, prompt, target):
+    """Recognize a few safe paraphrases; otherwise retain the user's exact clause."""
+    compact = _compact(prompt)
+    if _compact(clause) in compact:
+        return True
+    # Bind checks to a sentence about the same target, rather than finding a
+    # logo handle in one paragraph and a character replacement in another.
+    matching = [part for part in _clauses(prompt) if target and target.handle in part
+                and re.search(_REPLACE, part, re.I)]
+    if not target or target.handle not in clause or not matching:
+        return False
+    # If only the spelling of "replace" changed, all remaining source words
+    # must still be represented. Keep unknown details instead of guessing intent.
+    for part in matching:
+        source = re.sub(_REPLACE + r'|统一|使用|原来的?|旧的?|Logo|logo|标识|为|成|将|把|的', '', clause)
+        actual = re.sub(_REPLACE + r'|统一|使用|原来的?|旧的?|Logo|logo|标识|为|成|将|把|的', '', part)
+        if _compact(source) and _compact(source) in _compact(actual):
+            return True
+    return False
+
+
 def enforce_edit_requirements(prompt, brief, assets):
     rules = edit_requirements(brief)
     if not any(rules.values()):
         return prompt
     target = logo_reference(brief, assets)
     prompt = _remove_conflicts(_without_guard(prompt), rules, brief)
-    clauses = _edit_clauses(brief)
-    # The source line keeps exact brand names and placement, even if AI omitted them.
-    instructions = ['指定修改：' + '；'.join(clauses)] if clauses else []
-    if rules['logo']:
-        instructions.append(f'所有出现镜头及转场先清除指定旧品牌的文字、底形、描边、阴影及同品牌淡色/半透明字样，'
-                            f'修复覆盖区域，再呈现 {target.handle}；保留新 Logo 的图案、拼写、颜色与比例，不叠加新旧品牌。')
-        source = '；'.join(clauses)
-        if re.search(r'固定|角落|右下角|左下角|右上角|左上角|屏幕(?:叠加|标识)', source) and not re.search(r'衣服|衣领|胸前|招牌|包装|透视|跟随', source):
-            instructions.append('该界面 Logo 固定于用户指定的屏幕位置，大小稳定；在要求显示的时段内，包括压暗和弹层过渡，保持可见，不随人物运动。')
-        else:
-            instructions.append('位置与运动按指定载体：界面 Logo 固定屏幕位置，衣服或招牌上的 Logo 跟随载体；不擅自新增角落标识。')
-    elif rules['remove_logo']:
-        instructions.append('全片清除指定旧 Logo 的文字、底形、描边、阴影及同品牌淡色副本，修复覆盖区域，不添加新的 Logo。')
-    removed = [title for key, title in (('captions','字幕'),('watermarks','原视频水印'),('bottom_text','底部文字解释与说明条')) if rules[key]]
-    if removed:
-        instructions.append('全片去除' + '、'.join(removed) + '，恢复其覆盖区域的连续场景纹理；不要用模糊、马赛克、黑条或新文字代替。')
-    if rules['watermarks']:
-        instructions.append('逐帧跟踪清除漂浮、滚动、移动、淡入淡出及半透明的水印文字，覆盖全时段和全部移动路径；'
-                            '同步修复经过的人物、物体和背景，不能只清固定角落或首帧，不留拖影、残字或重复印记。')
-    instructions.append('以上修改优先于沿用原片与保留 UI；“其他文字不变”不包含指定旧品牌和待删除文字。'
-                        '仅保留未要求修改的活动说明、数值、按钮及明确保留的内容；其他角色、场景、动作修改仍按下文执行。')
-    return _PRIORITY + '\n' + '\n'.join(instructions) + '\n\n' + _BODY + '\n' + prompt
+    prompt = re.sub(r'其他界面文字', '未指定修改的界面文字', prompt)
+    prompt = re.sub(r'(?:所有|全部|其他)(文字|标识)(保持不变|不变)', r'未指定修改的\1\2', prompt)
+    # Supplement concrete user requirements only. Do not turn the validation
+    # checklist into hundreds of words of generic instructions for Seedance.
+    missing = []
+    for clause in _edit_clauses(brief):
+        if not _covered_edit(clause, '\n'.join([prompt, *missing]), target):
+            missing.append(clause)
+    if target and not any(target.handle in part and re.search(_REPLACE, part, re.I)
+                          for part in _clauses('\n'.join([prompt, *missing]))):
+        missing.append(f'将原 Logo 替换为 {target.handle}')
+    return ('；'.join(missing) + '。\n\n' + prompt).strip() if missing else prompt
+
+
+def optimization_brief(brief, assets):
+    """Do not feed our retired boilerplate back to AI as a new user requirement."""
+    if _PRIORITY in brief or '【替换与清理要求】' in brief:
+        return enforce_edit_requirements(_without_guard(brief), brief, assets)
+    return brief
