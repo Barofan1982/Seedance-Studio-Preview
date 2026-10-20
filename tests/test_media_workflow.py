@@ -212,7 +212,7 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertNotIn("不能在 seedance_prompt 里写它的 @文件名", text)
         self.assertEqual(draft.prompt, brief)
 
-    def test_prepared_frames_are_sent_to_chatgpt_and_kept_for_seedance(self):
+    def test_prepared_frames_are_sent_to_chatgpt_without_automatic_generation_references(self):
         with tempfile.TemporaryDirectory() as folder:
             frame = Path(folder) / "frame.jpg"
             frame.write_bytes(b"vision-image")
@@ -240,7 +240,8 @@ class MediaWorkflowTests(unittest.TestCase):
             self.assertNotIn("最多直接查看前 12 张", content[0]["text"])
             self.assertNotIn("未分析其内容", content[0]["text"])
             self.assertNotIn("AI 本次没有该视频的抽帧", content[0]["text"])
-            self.assertEqual(draft.keyframe_handles, [catalog[0]["handle"]])
+            self.assertEqual(draft.keyframe_handles, [])
+            self.assertIn('全部视频抽帧只供你识别内容，不会提交给 Seedance', content[0]['text'])
             self.assertTrue(frame.is_file())
 
 

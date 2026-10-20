@@ -386,15 +386,19 @@ class StudioWorkflowTests(unittest.TestCase):
         self.assertEqual(window.generate_button.text(), "生成视频 · 付费")
         payload = collect_payload(self.controller.state, self.controller.assets)
         self.assertEqual(payload["omni_reference_task_type"], "reference")
-        self.assertEqual(sum(v["type"] == "image_url" for v in payload["content"]), 3)
+        self.assertEqual(sum(v["type"] == "image_url" for v in payload["content"]), 1)
         self.assertEqual(payload["content"][-1]["video_url"]["url"], "https://example.com/washface.mp4")
-        self.assertIn("仅用于构图、动作", payload["content"][0]["text"])
+        self.assertNotIn("【关键帧参考】", payload["content"][0]["text"])
         dialog = KeyframeDialog(self.controller, Mock(), window)
         dialog.show()
         dialog.resize(740, 540)
         self.application.processEvents()
         self.assertTrue(dialog.rect().contains(dialog.apply_button.mapTo(dialog, dialog.apply_button.rect().bottomRight())))
-        chosen = [h for h, choice in dialog.choices.items() if choice.isChecked()]
+        self.assertFalse(dialog.attach_frames.isChecked())
+        dialog.attach_frames.setChecked(True)
+        chosen = list(dialog.choices)[:2]
+        for handle in chosen:
+            dialog.choices[handle].setChecked(True)
         dialog.choices[chosen[-1]].setChecked(False)
         dialog.apply()
         self.assertNotIn(chosen[-1], self.controller.state["prompt"])
@@ -527,7 +531,7 @@ class StudioWorkflowTests(unittest.TestCase):
         self.controller.state['prompt_draft']={'frame_count':1,'analysis_signature':analysis_signature(self.controller.assets),'analysis':'角色动作'}
         self.controller.apply_keyframes(['@{reference-00.00s.jpg}'])
         payload=collect_payload(self.controller.state,self.controller.assets)
-        template=deepcopy({key:self.controller.state[key] for key in ('frame_catalog','prompt_draft','generated_keyframe_binding','manual_prompt','ai_original_text')})
+        template=deepcopy({key:self.controller.state[key] for key in ('frame_catalog','prompt_draft','generated_keyframe_binding','manual_prompt','ai_original_text','use_keyframes_for_generation')})
         self.controller.history.add('template-parent',payload,original_prompt=self.controller.state['prompt'],assets=manifest(self.controller.assets),template=template)
         self.controller.history.update({'id':'template-parent','status':'succeeded'})
         self.controller.state.update(prompt='其他内容',frame_catalog=[],prompt_draft={})

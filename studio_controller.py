@@ -32,6 +32,7 @@ from upload_library import UploadLibrary, record_status, local_copy
 from image_library import ImageLibrary, image_copy, image_status
 from generation_queue import GenerationQueue, ACTIVE as QUEUE_ACTIVE
 from reasoning_settings import EFFORT_LABELS, supported_efforts, selected_effort
+from prompt_policy import cleanup_reference, frames_for_generation, strip_analysis_references, enforce_edit_requirements, edit_requirements
 
 from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
 MODES = {"全模态参考": "reference", "首帧图片": "first_frame", "首尾帧图片": "first_last_frame", "纯文本": "text"}
@@ -47,7 +48,7 @@ DEFAULTS = {
     "brief": "", "ai_original_text": "",
     "prompt": "", "analysis": "", "prompt_draft": {}, "task_id": "",
     "iteration_task_id": "", "review_output": False,
-    "frame_catalog": [], "generated_keyframe_binding": "",
+    "frame_catalog": [], "generated_keyframe_binding": "", "use_keyframes_for_generation": False,
     "cny_rates": DEFAULT_CNY_RATES,
     "removed_assets": [],
 }
@@ -105,6 +106,10 @@ def review_summary(state: dict, assets: list[MediaAsset]) -> str:
 def collect_payload(state: dict, assets: list[MediaAsset]) -> dict:
     settings = generation_settings(state, assets)
     original = prompt_for_submission(state)
+    if not frames_for_generation(state):
+        original = strip_analysis_references(original, state.get('frame_catalog', []), assets,
+                                             state.get('generated_keyframe_binding', ''))
+        assets = analysis_assets(assets)
     competitor = next((a for a in assets if a.purpose == "competitor"), None)
     if any(needs_upload(a) for a in assets):
         raise ValueError("本地视频需要上传，或参考地址已过期、文件已变化；点击生成将先上传，也可在素材菜单选择上传视频。")
@@ -204,6 +209,7 @@ class StudioController(QObject):
         self.state["task_type"] = "参考生视频"
         self.state["duration"] = str(self.state["duration"])
         self.assets = load_assets(saved.get("assets", []))
+        self.sync_keyframe_policy()
         self.api_key = load_key()
         self.openai_key = load_openai_key()
         self.auth = auth or ChatGPTSession(self.directory / "chatgpt_accounts.bin")
@@ -753,7 +759,20 @@ class StudioController(QObject):
             except Exception: pass
         self.changed.emit('upload_progress')
 
+    def sync_keyframe_policy(self):
+        if frames_for_generation(self.state):
+            return
+        for name in ('prompt', 'brief'):
+            self.state[name] = strip_analysis_references(self.state.get(name, ''), self.state.get('frame_catalog', []),
+                                                        self.assets, self.state.get('generated_keyframe_binding', ''))
+        self.assets = analysis_assets(self.assets)
+        self.state.update(use_keyframes_for_generation=False, generated_keyframe_binding='')
+        if self.state.get('prompt_draft'):
+            self.state['prompt_draft'].update(prompt=prompt_for_submission(self.state), keyframe_handles=[])
+
     def apply_keyframes(self, handles, *, notify=True):
+        if handles and cleanup_reference(prompt_for_submission(self.state)):
+            raise ValueError('Logo 替换与文字清理任务的关键帧仅供 AI 分析，不附加到视频生成。')
         catalog = self.state["frame_catalog"]
         available = {f["handle"] for f in catalog}
         handles = list(dict.fromkeys(handles))
@@ -772,13 +791,14 @@ class StudioController(QObject):
             prompt = prompt.replace(old, "").rstrip()
         binding = ("\n\n【关键帧参考】\n" + "、".join(handles)
                    + " 仅用于构图、动作与镜头顺序；替换角色的外观以角色图为准。") if handles else ""
-        self.state.update(prompt=prompt + binding, brief=prompt + binding, generated_keyframe_binding=binding)
+        self.state.update(prompt=prompt + binding, brief=prompt + binding, generated_keyframe_binding=binding,
+                          use_keyframes_for_generation=bool(handles))
         if self.state.get("prompt_draft"):
             self.state["prompt_draft"].update(prompt=prompt + binding, keyframe_handles=handles)
         if notify:
             self.save()
             self.changed.emit("draft")
-            self.set_status(f"已选择 {len(handles)} 张关键帧用于生成")
+            self.set_status(f"已选择 {len(handles)} 张关键帧用于生成" if handles else "关键帧仅供分析，未附加到视频生成")
 
     def analysis_account(self):
         return self.auth.active_account() if self.state['ai_provider'] == 'chatgpt' else self.platform_accounts.sessions[self.state['ai_provider']].active_account()
@@ -913,6 +933,7 @@ class StudioController(QObject):
         if self.state.get("generated_keyframe_binding"):
             brief = brief.replace(self.state["generated_keyframe_binding"], "").rstrip()
         previous = self.state["prompt"].strip()
+        attach_frames = frames_for_generation(self.state)
         settings = generation_settings(self.state, assets)
         parent = self.state["iteration_task_id"]
         generated = None
@@ -936,7 +957,7 @@ class StudioController(QObject):
                                                                     transcription_api_key=transcription_key, reasoning_effort=effort))
             draft = client.draft(competitor, assets, brief, transcribe_audio=transcribe, generation_settings=settings,
                                  generated_video=generated, previous_prompt=previous, on_progress=self._progress.emit,
-                                 reference_frames=catalog)
+                                 reference_frames=catalog, use_keyframes_for_generation=attach_frames)
             return {"draft": asdict(draft), "frames": catalog, "sources": manifest(assets), "provider":provider,
                     "ai_usage":self.platform_accounts.sessions[provider].usage if provider != 'chatgpt' else {}}
 
@@ -955,6 +976,14 @@ class StudioController(QObject):
             data['ai_model'] = model
             data['ai_reasoning_effort'] = effort
             data['ai_usage'] = result.get('ai_usage', {})
+            if not attach_frames:
+                data['prompt'] = strip_analysis_references(data['prompt'], result['frames'], self.assets,
+                                                          self.state.get('generated_keyframe_binding', ''))
+                data['keyframe_handles'] = []
+            data['prompt'] = enforce_edit_requirements(data['prompt'], brief, assets)
+            data['use_keyframes_for_generation'] = attach_frames
+            if edit_requirements(brief)['watermarks']:
+                self.state['watermark'] = False
             self.state["prompt_draft"] = data
             self.state["manual_prompt"] = False
             self.state["prompt"] = data["prompt"]
@@ -963,17 +992,18 @@ class StudioController(QObject):
             self.state["analysis"] = data["analysis"]
             capacity = 30 - sum(a.selected and a.kind == "image" for a in analysis_assets(self.assets))
             mentioned = [f["handle"] for f in result["frames"] if f["handle"] in data["prompt"]]
-            chosen = choose_keyframes(result["frames"], mentioned + data.get("keyframe_handles", []), capacity)
+            chosen = choose_keyframes(result["frames"], mentioned + data.get("keyframe_handles", []), capacity) if attach_frames else []
             if any(h not in chosen for h in mentioned):
                 raise ValueError("智能分析引用了过多关键帧，请减少其他图片后重新分析。")
             self.apply_keyframes(chosen, notify=False)
             self.save()
             self.changed.emit("draft")
-            self.set_status(f"已分析 {len(result['frames'])} 张画面，选择 {len(chosen)} 张关键帧；核对提示词后可生成")
+            self.set_status(f"已分析 {len(result['frames'])} 张画面；" + (f"附加 {len(chosen)} 张关键帧" if attach_frames else '关键帧仅供分析，生成使用勾选的视频与素材'))
 
         self.set_status("正在智能分析素材…" if not generated else "正在智能对比参考视频与成片…")
         self.start_job("refine" if generated else "draft", {
             "model": model, "provider":provider, "reasoning_effort": effort,
+            "use_keyframes_for_generation": attach_frames,
             "auth_mode": "chatgpt_plan" if provider == 'chatgpt' else 'api_key',
             "billing_source": "ChatGPT 会员额度" if provider == 'chatgpt' else 'DeepSeek API 余额（接口单独计费）',
             "audio_transcription": {"enabled": transcribe, "billing_source": "OpenAI 接口单独计费" if transcribe else "未启用"},
@@ -993,11 +1023,11 @@ class StudioController(QObject):
         keys = ('mode','task_type','resolution','duration','ratio','generate_audio','watermark',
                 'return_last_frame','output_format','download_dir','brief','prompt','analysis',
                 'prompt_draft','frame_catalog','generated_keyframe_binding','ai_original_text',
-                'manual_prompt','auto_analyze','iteration_task_id','review_output')
+                'manual_prompt','auto_analyze','iteration_task_id','review_output','use_keyframes_for_generation')
         return {'payload': payload, 'assets': manifest(self.assets), 'mode': MODES[self.state['mode']],
                 'original_prompt': prompt_for_submission(self.state), 'parent_task_id': self.state['iteration_task_id'],
                 'template': deepcopy({key:self.state[key] for key in ('prompt_draft','frame_catalog',
-                                    'generated_keyframe_binding','ai_original_text','manual_prompt','auto_analyze')}),
+                                    'generated_keyframe_binding','ai_original_text','manual_prompt','auto_analyze','use_keyframes_for_generation')}),
                 'settings': generation_settings(self.state, self.assets),
                 'state': deepcopy({key:self.state[key] for key in keys}),
                 'base_url': self.state['base_url'].strip().rstrip('/'),
@@ -1126,6 +1156,7 @@ class StudioController(QObject):
         self.state.update(deepcopy(item['snapshot']['state']))
         self.state['auto_analyze'] = item['snapshot']['state'].get('auto_analyze',False)
         self.assets = load_assets(item['snapshot']['assets'])
+        self.sync_keyframe_policy()
         self.save()
         self.changed.emit('all')
         self.changed.emit('queue')
@@ -1363,6 +1394,7 @@ class StudioController(QObject):
             iteration_task_id=row["task_id"], review_output=refine,
             prompt_draft=template.get('prompt_draft',{}), manual_prompt=template.get('manual_prompt',True) and not refine,
             auto_analyze=template.get('auto_analyze',False),
+            use_keyframes_for_generation=template.get('use_keyframes_for_generation',False),
             frame_catalog=template.get('frame_catalog',[]), generated_keyframe_binding=binding,
             ai_original_text=template.get('ai_original_text',prompt), analysis=(template.get('prompt_draft') or {}).get('analysis',''),
         )
@@ -1371,6 +1403,7 @@ class StudioController(QObject):
         for key in ("watermark", "return_last_frame", "generate_audio"):
             self.state[key] = payload.get(key, DEFAULTS[key])
         self.assets = load_assets(json.loads(row["assets_json"]))
+        self.sync_keyframe_policy()
         self.remember_images(self.assets)
         self.save()
         self.changed.emit("all")
@@ -1384,15 +1417,15 @@ class StudioController(QObject):
                           task_type='参考生视频', prompt=record['original_prompt'], brief=record['original_prompt'],
                           ai_original_text=record.get('source_brief',''), iteration_task_id=record.get('parent_task_id',''),
                           review_output=False, manual_prompt=True, frame_catalog=record.get('frames',[]),
-                          generated_keyframe_binding='', prompt_draft=record['draft'], analysis=record['draft'].get('analysis',''))
+                          generated_keyframe_binding='', prompt_draft=record['draft'], analysis=record['draft'].get('analysis',''),
+                          use_keyframes_for_generation=record['draft'].get('use_keyframes_for_generation',False))
         for key in ('resolution','ratio','output_format','generate_audio','watermark','return_last_frame'):
             self.state[key]=settings.get(key,DEFAULTS[key])
         self.state['duration']=str(settings.get('duration',DEFAULTS['duration']))
-        if self.state['frame_catalog'] and all(Path(f['path']).is_file() for f in self.state['frame_catalog']):
+        if frames_for_generation(self.state) and self.state['frame_catalog'] and all(Path(f['path']).is_file() for f in self.state['frame_catalog']):
             capacity=30-sum(a.selected and a.kind=='image' for a in analysis_assets(self.assets))
             self.apply_keyframes(choose_keyframes(self.state['frame_catalog'],record['draft'].get('keyframe_handles',[]),capacity),notify=False)
-        else:
-            self.state['frame_catalog']=[]
+        self.sync_keyframe_policy()
         self.save()
         self.changed.emit('all')
         self.set_status('已载入提示词版本，可继续修改后生成')

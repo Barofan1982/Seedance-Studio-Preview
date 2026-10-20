@@ -650,13 +650,20 @@ class KeyframeDialog(QDialog):
     def __init__(self, controller, preview, parent=None):
         super().__init__(parent)
         self.controller = controller
-        self.setWindowTitle("选择关键帧")
+        self.setWindowTitle("分析画面与关键帧")
         self.resize(900, 760)
         self.setMinimumSize(740, 540)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(14)
         layout.addWidget(label(f"每秒抽帧 · {len(controller.state['frame_catalog'])} 张", "Section"))
+        from prompt_policy import cleanup_reference, frames_for_generation
+        brief = controller.state.get('prompt','').strip() or controller.state.get('brief','')
+        self.attach_frames = QCheckBox('将选中画面附加到视频生成（可选）')
+        self.attach_frames.setChecked(frames_for_generation(controller.state))
+        self.attach_frames.setEnabled(not cleanup_reference(brief))
+        layout.addWidget(self.attach_frames)
+        layout.addWidget(label('默认仅供 AI 分析；Logo 替换与文字清理任务不附加关键帧。', 'Muted', True))
         body = QWidget()
         grid = QGridLayout(body)
         grid.setSpacing(12)
@@ -686,15 +693,20 @@ class KeyframeDialog(QDialog):
         footer.addWidget(self.apply_button)
         layout.addLayout(footer)
         self.update_count()
+        self.attach_frames.toggled.connect(self.update_count)
 
     def update_count(self):
+        enabled = self.attach_frames.isChecked()
+        for choice in self.choices.values():
+            choice.setEnabled(enabled)
         count = sum(c.isChecked() for c in self.choices.values())
-        self.summary.setText(f"已选 {count} 张 · 当前最多 {self.capacity} 张")
-        self.apply_button.setEnabled(count <= self.capacity)
+        self.summary.setText(f"已选 {count} 张 · 当前最多 {self.capacity} 张" if enabled else '仅供 AI 分析 · 不提交给视频生成接口')
+        self.apply_button.setText('应用关键帧' if enabled else '完成')
+        self.apply_button.setEnabled(not enabled or count <= self.capacity)
 
     def apply(self):
         try:
-            self.controller.apply_keyframes([h for h, c in self.choices.items() if c.isChecked()])
+            self.controller.apply_keyframes([h for h, c in self.choices.items() if c.isChecked()] if self.attach_frames.isChecked() else [])
         except ValueError as error:
             self.summary.setText(str(error))
             return

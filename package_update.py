@@ -1,4 +1,5 @@
 """Create an external EXE update ZIP without source or runtime data."""
+import argparse
 import hashlib
 import json
 import zipfile
@@ -11,7 +12,14 @@ def checksum(path):
 
 def main():
     root = Path(__file__).resolve().parent
-    previous = json.loads((root / 'reports' / 'pre-reasoning-bundle.json').read_text(encoding='utf-8'))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--baseline', type=Path, default=root / 'reports' / 'pre-reasoning-bundle.json')
+    parser.add_argument('--name', default='Seedance-Studio-Reasoning-Update.zip')
+    parser.add_argument('--notes', type=Path, help='UTF-8 title and release notes, before the common update instructions')
+    args = parser.parse_args()
+    if Path(args.name).name != args.name or not args.name.lower().endswith('.zip'):
+        raise SystemExit('Update name must be a ZIP filename without directory components.')
+    previous = json.loads(args.baseline.read_text(encoding='utf-8'))
     bundle = root / 'build' / 'portable-output' / 'Seedance Studio'
     validation = json.loads((bundle / '便携版校验.json').read_text(encoding='utf-8'))
     if not validation.get('success'):
@@ -32,10 +40,11 @@ def main():
             files[relative.as_posix()] = path
     if 'Seedance Studio.exe' not in changed:
         raise SystemExit('No updated executable was found.')
-    instructions = '''Seedance Studio · 思考强度更新
+    notes = args.notes.read_text(encoding='utf-8').strip() if args.notes else '''Seedance Studio · 思考强度更新
 
 默认思考强度为“高”，可以在“分析平台 · 连接设置”或“工作室设置”中手动调整。
-按平台、模型分别保存选择，并写入实际分析请求和调用记录。
+按平台、模型分别保存选择，并写入实际分析请求和调用记录。'''
+    instructions = notes + '''
 
 本更新包用于已安装的 Windows EXE 便携版。
 1. 关闭 Seedance Studio，建议备份旧程序文件。
@@ -49,7 +58,7 @@ def main():
 保留现有 data、成片目录及 _internal 文件夹中的其他运行库。
 不知道即梦 API Token 或中转站登录账号，请联系吴仕敏索取文档和密钥。
 '''
-    archive = root / 'dist' / 'Seedance-Studio-Reasoning-Update.zip'
+    archive = root / 'dist' / args.name
     manifest = {name: checksum(path) for name, path in files.items()}
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as package:
         for name, path in files.items():

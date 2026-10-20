@@ -17,6 +17,7 @@ from pathlib import Path
 from media_assets import MediaAsset, _run_media_tool, extract_audio, sample_video_frames
 from error_diagnostics import MAX_ERROR_BYTES, response_snapshot, safe_text
 from reasoning_settings import EFFORT_LABELS
+from prompt_policy import cleanup_reference, enforce_edit_requirements
 
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -335,6 +336,7 @@ class OpenAIPromptClient:
         previous_prompt: str = "",
         on_progress=None,
         reference_frames: list[dict] | None = None,
+        use_keyframes_for_generation: bool = False,
     ) -> PromptDraft:
         if competitor and (competitor.kind != "video" or competitor.path is None and reference_frames is None):
             raise ValueError("参考视频必须是本地视频文件。")
@@ -363,7 +365,8 @@ class OpenAIPromptClient:
                 if audio_path:
                     transcript = (f"参考视频转写：{transcript}\n" if transcript else "") + "成片转写：" + self.transcribe(audio_path)
 
-            selected_images = [asset for asset in assets if asset.selected and asset.kind == "image" and asset.path]
+            use_keyframes_for_generation = use_keyframes_for_generation and not cleanup_reference(creative_brief)
+            selected_images = [asset for asset in assets if asset.selected and asset.kind == "image" and asset.path and asset.purpose != 'keyframe']
             selected_assets = [asset for asset in assets if asset.selected and asset.purpose != "competitor"]
             observed_videos = {frame["source_handle"] for frame in reference_frames or []}
             asset_lines = [
@@ -392,7 +395,7 @@ class OpenAIPromptClient:
             )
             text = (
                 "任务：先逐帧观察参考视频（若有），识别视频讲述的事情、人物关系、动作因果、镜头与节奏，"
-                "然后用我的本地角色和场景图片写一段可直接用于 Seedance 2.5 的中文提示词。\n"
+                "然后按用户指定的修改与素材用途，写一段可直接用于 Seedance 2.5 的中文提示词。\n"
                 + video_context
                 +
                 f"创作要求：{creative_brief.strip() or '保持参考视频的镜头节奏与动作逻辑，替换角色和场景。'}\n"
@@ -435,6 +438,22 @@ class OpenAIPromptClient:
                    f"\n上一版提示词：{previous_prompt}\n成片文件：{generated_video.name}\n"
                    if generated_video else "")
             )
+            if not use_keyframes_for_generation:
+                text += ('\n【分析与生成附件分离】全部视频抽帧只供你识别内容，不会提交给 Seedance。'
+                         'keyframe_handles 必须返回空数组；最终提示词只能引用用户勾选的视频与原始素材，'
+                         '不得引用任何抽帧文件名，不得要求附带关键帧，不得把原片待删除的 Logo、字幕、水印当作保留参考。')
+                text = text.replace('有候选关键帧时，在 keyframe_handles 中推荐 2–4 张覆盖开场、主要动作和叙事反馈的画面；'
+                                    '结尾包含动作结果、人物互动或表情反馈时，至少选一张呈现该结尾的画面。', '')
+                text = text.replace('工具会按最终勾选结果补充。', '抽帧仅供分析。')
+            if cleanup_reference(creative_brief):
+                text += ('\n【定向替换与清理】用户要修改的是原片中指定的标识和文字。逐镜头识别旧 Logo 的位置、出现时段、'
+                         '透视与遮挡，识别字幕、水印、底部解释区。最终提示词明确写出用户指定的替换对象、对应附件和全片清除要求；'
+                         '用户要求替换 Logo 时，全片保持新 Logo 一致，不保留旧品牌；用户要求清理的字幕或说明条不得重新添加。'
+                         '不得擅自改变主体、人物外观、动作、镜头顺序或玩法。'
+                         '禁止只写“参考原视频风格”来代替这些修改要求。只删用户要求删除的文字，其他明确要求保留的内容不动。')
+                text += ('水印可能是漂浮、滚动、跨区域移动、半透明或淡入淡出的文字；观察不同时间的帧识别其轨迹和遮挡区域。'
+                         '用户要求去水印时，最终提示词明确要求全时段逐帧跟踪清除和修复覆盖区域，不仅清理固定位置，'
+                         '不能保留滚动水印、拖影或残字。抽帧未覆盖的运动不能虚构具体轨迹或精确时间点。')
             content: list[dict] = [{"type": "input_text", "text": text}]
             for frame in reference_frames or []:
                 content.append({"type": "input_text", "text":
@@ -471,7 +490,7 @@ class OpenAIPromptClient:
                     "你是游戏广告短视频的分镜分析师和 Seedance 2.5 提示词编写者。"
                     "先根据抽帧与转写忠实分析镜头，区分证据与推断。"
                     "写出的提示词应保留可复用的叙事结构、动作和运镜，"
-                    "明确把人物和场景替换为用户提供的图片。"
+                    "仅在用户要求时替换人物、场景或 Logo，按素材用途匹配附件；Logo 图片不得当作人物或场景图。"
                     "保留参考视频的画面类型与核心交互机制；角色/背景替换不能丢失游戏棋盘、拼图块等关键结构。"
                     "不要把参考视频画面中的角色、商标、文字当作用户希望保留的素材。"
                     "如引用素材，必须使用用户给出的 @{文件名} 形式；不要使用绝对路径。"
@@ -504,10 +523,10 @@ class OpenAIPromptClient:
                 return PromptDraft(
                     analysis=data["analysis"],
                     shots=data["shots"],
-                    prompt=data["seedance_prompt"],
+                    prompt=enforce_edit_requirements(data["seedance_prompt"], creative_brief, assets),
                     uncertainties=data["uncertainties"],
                     transcript=transcript,
-                    keyframe_handles=data.get("keyframe_handles", []),
+                    keyframe_handles=data.get("keyframe_handles", []) if use_keyframes_for_generation else [],
                 )
             except (ValueError, KeyError, TypeError) as error:
                 raise OpenAIError("AI 返回的分析结构不完整。") from error

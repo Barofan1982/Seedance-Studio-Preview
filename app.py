@@ -837,7 +837,7 @@ class StudioWindow(QMainWindow):
             has_video = bool(reference_videos(self.controller.assets))
             self.ai_button.setText("抽帧并优化" if has_video else "智能对比优化" if state["review_output"] else "智能优化提示词")
             count = sum(a.selected and a.purpose == "keyframe" for a in self.controller.assets)
-            self.keyframe_button.setText(f"关键帧 · {count}" if state["frame_catalog"] else "关键帧")
+            self.keyframe_button.setText((f"关键帧 · {count}" if count else f"分析画面 · {len(state['frame_catalog'])}") if state["frame_catalog"] else "分析画面")
             self.keyframe_button.setEnabled(bool(state["frame_catalog"]) and not self.controller.busy)
             self.refresh_generation()
 
