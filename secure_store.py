@@ -65,8 +65,10 @@ def _save_key(path: Path, key: str) -> None:
     temporary.replace(path)
 
 
-def load_key() -> str:
-    return _load_key(KEY_FILE)
+def load_key(directory=None) -> str:
+    """Read the key from ``directory`` when given, otherwise the local profile."""
+    path = (Path(directory).expanduser() / "api_key.bin") if directory else KEY_FILE
+    return _load_key(path)
 
 
 def save_key(key: str) -> None:

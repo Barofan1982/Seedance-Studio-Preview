@@ -18,3 +18,11 @@ class SecureStoreTests(unittest.TestCase):
                 self.assertEqual(secure_store.load_key(), "dummy-secret-for-test")
                 secure_store.remove_key()
                 self.assertFalse(path.exists())
+
+    def test_directory_override_reads_that_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api_key.bin"
+            with patch.object(secure_store, "KEY_FILE", path):
+                secure_store.save_key("dummy-secret-for-directory")
+                self.assertEqual(secure_store.load_key(directory), "dummy-secret-for-directory")
+                secure_store.remove_key()

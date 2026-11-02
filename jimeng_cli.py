@@ -4,11 +4,15 @@
 复用桌面版 Seedance Studio 的客户端模块，以及它用 Windows DPAPI 加密保存的
 接口密钥（api_key.bin）。不复制、不打印、不落盘明文密钥。
 
+提交成功后写入桌面版同一个 history.sqlite3，历史与用量页刷新即可看到；
+--data-dir 可指向便携版 data 目录，--no-history 可关闭写入。
+
 示例：
     python jimeng_cli.py --list-models
     python jimeng_cli.py -p "小猫在窗台伸懒腰" --mode text --duration 5 --ratio 16:9
     python jimeng_cli.py -p "参考这张图做一个镜头推进" --image D:\\pics\\a.png --duration 5
     python jimeng_cli.py --task-id cgt-xxxx --out-dir D:\\Test\\out
+    python jimeng_cli.py -p "..." --data-dir "D:\\portable\\data"
 
 stdout 只输出一行 JSON 结果；进度与提示写到 stderr。
 """
@@ -38,11 +42,14 @@ from seedance_client import (  # noqa: E402
     DEFAULT_MODEL_CATALOG_URL,
     SeedanceClient,
     SeedanceError,
+    SubmissionUncertain,
     build_payload,
     download_video,
-    estimated_cost_usd,
 )
 from seedance_models import DEFAULT_VIDEO_MODEL, MODE_NAMES  # noqa: E402
+from billing_cny import billing_details, pricing_snapshot  # noqa: E402
+from history_store import HistoryStore  # noqa: E402
+from media_assets import video_metadata  # noqa: E402
 
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
 IMAGE_MIME = {
@@ -65,14 +72,23 @@ def fail(message: str, *, code: int = 1, extra: dict | None = None) -> "None":
     raise SystemExit(code)
 
 
-def _settings() -> dict:
+def _settings(data_dir=None) -> dict:
     """GUI 里保存的接口地址优先，缺省回落到模块默认值。"""
-    path = APP_DIR / "state.json"
+    path = (Path(data_dir).expanduser() if data_dir else APP_DIR) / "state.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _data_home(data_dir=None) -> Path:
+    return Path(data_dir).expanduser() if data_dir else APP_DIR
+
+
+def _rates(state: dict) -> dict:
+    value = state.get("cny_rates")
+    return value if isinstance(value, dict) else {}
 
 
 def _display(value):
@@ -101,10 +117,11 @@ def _source(value: str, table: dict[str, str], label: str) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
-def _client(state: dict) -> SeedanceClient:
-    key = load_key()
+def _client(state: dict, data_dir=None) -> SeedanceClient:
+    key = load_key(data_dir)
     if not key:
-        fail("本机没有保存接口密钥。请先打开 Seedance Studio 填写一次，或联系吴仕敏索取。")
+        fail(f"{_data_home(data_dir)} 中没有保存接口密钥。请先打开 Seedance Studio "
+             "填写一次，或用 --data-dir 指向对应数据目录；也可以联系吴仕敏索取。")
     base_url = str(state.get("base_url") or DEFAULT_BASE_URL)
     catalog = str(state.get("model_catalog_url") or DEFAULT_MODEL_CATALOG_URL)
     allow_http = bool(state.get("allow_http_for"))
@@ -147,6 +164,101 @@ def _payload(args, state: dict) -> dict:
         )
     except ValueError as error:
         fail(str(error))
+
+
+def _mode(args) -> str:
+    """Infer the generation mode when resuming a task without asset arguments."""
+    if args.first_frame and args.last_frame:
+        return 'first_last_frame'
+    if args.first_frame:
+        return 'first_frame'
+    if args.image or args.video or args.audio:
+        return 'reference'
+    return args.mode
+
+
+def _resume_payload(task: dict, args) -> dict:
+    """Best-effort request record for a task submitted outside this process."""
+    prompt = (args.prompt or '').strip()
+    content = [{'type': 'text', 'text': prompt}] if prompt else []
+    duration = task.get('duration')
+    if not isinstance(duration, int) or isinstance(duration, bool):
+        duration = args.duration
+    resolution = task.get('resolution')
+    if resolution not in ('480p', '720p', '1080p', '4k'):
+        resolution = args.resolution
+    ratio = task.get('ratio')
+    if not isinstance(ratio, str) or not ratio:
+        ratio = args.ratio
+    return {'model': str(task.get('model') or args.model), 'content': content,
+            'duration': duration, 'resolution': resolution, 'ratio': ratio}
+
+
+def _history(args):
+    if args.no_history:
+        return None
+    path = _data_home(args.data_dir) / 'history.sqlite3'
+    if args.data_dir and not path.is_file():
+        log(f'数据目录中没有 history.sqlite3，将新建：{path}')
+    try:
+        return HistoryStore(path)
+    except Exception as error:
+        log(f'历史与用量无法写入（{path}）：{error}')
+        return None
+
+
+def _record_submission(store, task_id, payload, args, state):
+    if not store:
+        return
+    try:
+        store.add(task_id, payload, _mode(args), original_prompt=args.prompt or '',
+                  template={'generation_model': args.model,
+                            'generation_profile': state.get('generation_profile', '')},
+                  initial_status='submitted',
+                  billing_rates=pricing_snapshot(_rates(state)))
+    except Exception as error:
+        log(f'历史与用量写入失败（任务 {task_id}）：{error}')
+
+
+def _record_result(store, task, args, state, path=None):
+    if not store:
+        return
+    task_id = str(task.get('id', ''))
+    if not task_id:
+        return
+    try:
+        if store.get(task_id) is None:
+            _record_submission(store, task_id, _resume_payload(task, args), args, state)
+        store.update(task)
+        if path:
+            store.set_local_path(task_id, Path(path))
+            try:
+                info = video_metadata(Path(path))
+            except Exception:
+                info = {}
+            if info:
+                store.set_media_info(task_id, info)
+    except Exception as error:
+        log(f'历史与用量写入失败（任务 {task_id}）：{error}')
+
+
+def _begin_call(store, payload, prompt):
+    if not store:
+        return None
+    try:
+        return store.begin_call('create', {'payload': payload, 'original_prompt': prompt})
+    except Exception as error:
+        log(f'提交记录无法写入：{error}')
+        return None
+
+
+def _finish_call(store, call_id, *, response=None, error='', uncertain=False):
+    if not store or not call_id:
+        return
+    try:
+        store.finish_call(call_id, response=response, error=error, uncertain=uncertain)
+    except Exception as write_error:
+        log(f'提交记录更新失败：{write_error}')
 
 
 def _wait(client: SeedanceClient, task_id: str, timeout: int, interval: int) -> dict:
@@ -209,7 +321,9 @@ def main() -> None:
     parser.add_argument("--no-audio", action="store_true", help="不生成声音")
     parser.add_argument("--watermark", action="store_true", help="生成水印")
     parser.add_argument("--return-last-frame", action="store_true", help="要求返回尾帧")
-    parser.add_argument("--out-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--out-dir", help="成片目录；默认使用桌面版设置中的保存目录")
+    parser.add_argument("--data-dir", help="桌面版数据目录（state.json、api_key.bin、history.sqlite3）；默认本机开发数据目录")
+    parser.add_argument("--no-history", action="store_true", help="不写入桌面版历史与用量")
     parser.add_argument("--timeout", type=int, default=1800, help="最长等待秒数（默认 1800）")
     parser.add_argument("--interval", type=int, default=5, help="轮询间隔秒数（默认 5）")
     parser.add_argument("--task-id", help="续查已有任务")
@@ -223,9 +337,10 @@ def main() -> None:
         except OSError as error:
             fail(f"提示词文件读取失败：{error}")
 
-    state = _settings()
-    client = _client(state)
-    out_dir = Path(args.out_dir)
+    state = _settings(args.data_dir)
+    client = _client(state, args.data_dir)
+    out_dir = (Path(args.out_dir).expanduser() if args.out_dir
+               else Path(str(state.get("download_dir") or DEFAULT_OUTPUT_DIR)).expanduser())
 
     if args.list_models:
         try:
@@ -243,24 +358,52 @@ def main() -> None:
                           "payload": _display(payload)}, ensure_ascii=False))
         return
 
+    store = _history(args)
+
     task_id = args.task_id
     if not task_id:
         payload = _payload(args, state)
         log(f"提交任务：{payload['model']} / {args.duration}s / {args.resolution} / {args.ratio}")
+        call_id = _begin_call(store, payload, args.prompt or "")
         try:
             task_id = client.create_task(payload)
-        except SeedanceError as error:
+        except SubmissionUncertain as error:
+            _finish_call(store, call_id, error=str(error), uncertain=True)
             fail(str(error))
+        except SeedanceError as error:
+            _finish_call(store, call_id, error=str(error))
+            fail(str(error))
+        except Exception as error:
+            _finish_call(store, call_id, error=str(error))
+            fail(f"提交失败：{error}")
+        _finish_call(store, call_id, response={"id": task_id})
+        _record_submission(store, task_id, payload, args, state)
         log(f"任务编号：{task_id}")
 
     task = _wait(client, task_id, args.timeout, args.interval)
     status = str(task.get("status", ""))
+    _record_result(store, task, args, state)
     if status != "succeeded":
         detail = task.get("error") or task.get("message") or ""
         fail(f"任务结束状态为 {status}。{detail}".strip(), extra={"task_id": task_id, "status": status})
 
     path = _save(task, out_dir)
+    _record_result(store, task, args, state, path=path)
+    if store:
+        log(f"历史与用量已写入：{store.path}")
     usage = task.get("usage") if isinstance(task.get("usage"), dict) else {}
+    record = store.get(task_id) if store else None
+    if record is None:
+        record = {
+            "model": str(task.get("model") or args.model),
+            "status": status,
+            "request_json": _resume_payload(task, args),
+            "billing_rates_json": pricing_snapshot(_rates(state)),
+            "completion_tokens": usage.get("completion_tokens"),
+            "actual_duration": task.get("duration"),
+            "actual_resolution": task.get("resolution"),
+        }
+    cost = billing_details(record, _rates(state))
     print(json.dumps({
         "ok": True,
         "task_id": task_id,
@@ -272,7 +415,10 @@ def main() -> None:
         "duration": task.get("duration", ""),
         "ratio": task.get("ratio", ""),
         "usage": usage,
-        "estimated_cost_usd": estimated_cost_usd(task, str(task.get("model", ""))),
+        "estimated_cost_cny": float(cost["amount"]) if cost["amount"] is not None else None,
+        "estimated_cost_usd": float(cost["usd"]) if cost["usd"] is not None else None,
+        "cost_source": cost["source"] if cost["amount"] is not None else cost["reason"],
+        "history_file": str(store.path) if store else "",
     }, ensure_ascii=False))
 
 

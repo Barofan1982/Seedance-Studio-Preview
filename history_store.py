@@ -323,6 +323,11 @@ class HistoryStore:
                 task.get('resolution') if task.get('resolution') in ('480p', '720p', '1080p', '4k') else '', task_id,
             ))
 
+    def get(self, task_id: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            return dict(row) if row else None
+
     def rows(self) -> list[dict]:
         with self._connect() as connection:
             return [dict(row) for row in connection.execute("SELECT * FROM tasks ORDER BY created_at DESC, task_id DESC")]

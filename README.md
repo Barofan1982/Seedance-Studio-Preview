@@ -39,6 +39,10 @@ pythonw start.pyw
 
 以上 Python 启动步骤仅用于源码开发。源码运行需 Python、本项目依赖及 PATH 中的 FFmpeg/FFprobe。
 
+### 命令行生成（可选）
+
+`jimeng_cli.py` 可在不打开界面的情况下提交、查询和下载。默认复用本机开发数据目录的密钥、保存目录和 `history.sqlite3`，任务会出现在桌面版历史与用量页，点击“刷新”即可看到；`--data-dir` 指向便携版 `data/` 时使用该目录的密钥与历史，`--no-history` 关闭写入。命令行记录的素材清单为空，暂不支持在桌面版一键复用素材。
+
 首次迁移已复制原工具的设置、加密密钥、ChatGPT 登录、素材清单、提示词和历史。右上角可选择 ChatGPT 账号登录或 DeepSeek API Key 接入；启动时刷新上次选择的平台。DeepSeek 通过 API 分析文本和图片，校验密钥只读取模型列表，推理按接口用量单独计费。连接方式与额度来源见 [PLATFORM_LOGIN.md](PLATFORM_LOGIN.md)。
 
 ## 界面
