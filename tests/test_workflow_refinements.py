@@ -34,7 +34,7 @@ class RefinementTests(unittest.TestCase):
         with patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
             self.controller = StudioController(self.path, auth=auth)
         self.controller.api_key = 'synthetic-key'
-        self.controller.state.update(prompt='猫咪跑步', brief='猫咪跑步', mode='纯文本', duration='4', base_url='https://example.invalid/api/v3')
+        self.controller.state.update(prompt='猫咪跑步', brief='猫咪跑步', mode='纯文本', duration='4', model_catalog_url="", base_url='https://example.invalid/api/v3')
         self.window = None
 
     def tearDown(self):

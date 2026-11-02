@@ -28,7 +28,7 @@ class StartupIndependenceTests(unittest.TestCase):
         with patch('studio_controller.load_key', return_value=''), patch('studio_controller.load_openai_key', return_value=''):
             self.controller = StudioController(Path(self.temp.name), auth=self.auth)
         self.controller.api_key = 'synthetic-seedance-token'
-        self.controller.state.update(base_url='https://example.invalid/api/v3', mode='纯文本', prompt='小猫跑步', brief='小猫跑步',
+        self.controller.state.update(model_catalog_url="", base_url='https://example.invalid/api/v3', mode='纯文本', prompt='小猫跑步', brief='小猫跑步',
                                      auto_analyze=False, duration='4', openai_model='synthetic-model')
         self.errors = []
         self.controller.failed.connect(self.errors.append)

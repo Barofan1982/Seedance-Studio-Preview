@@ -50,7 +50,7 @@ class StudioWorkflowTests(unittest.TestCase):
         self.auth.models.return_value = [{"slug": "test-model", "display_name": "Test model"}]
         self.controller = self.new_controller()
         self.controller.api_key = "dummy-key"
-        self.controller.state.update(base_url="https://example.com/api/v3", mode="纯文本", prompt="小猫跑步", duration="4", download_dir=str(self.directory / "videos"))
+        self.controller.state.update(model_catalog_url="", base_url="https://example.com/api/v3", mode="纯文本", prompt="小猫跑步", duration="4", download_dir=str(self.directory / "videos"))
         self.errors = []
         self.controller.failed.connect(self.errors.append)
         self.window = None
@@ -236,7 +236,7 @@ class StudioWorkflowTests(unittest.TestCase):
         with patch("studio_controller.add_local_asset", side_effect=import_asset):
             self.controller.import_files([str(self.directory / "a.png"), str(self.directory / "b.png")])
             self.pump_until(lambda: not self.controller.busy)
-        self.assertEqual([a.purpose for a in self.controller.assets], ["character", "other"])
+        self.assertEqual([a.purpose for a in self.controller.assets], ["other", "other"])
         payload = build_payload(prompt="@图片1角色", duration=4, resolution="1080p", ratio="9:16", output_format="mov", generate_audio=False)
         self.controller.history.add("reuse", payload, original_prompt="@{a.png}角色", assets=manifest(self.controller.assets))
         self.controller.reuse(self.controller.row("reuse"))

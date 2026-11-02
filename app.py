@@ -29,7 +29,7 @@ from video_analysis import needs_video_analysis, reference_videos
 from generation_status import PHASES, generation_feedback, unconfirmed_detail
 from history_view import HistoryDetailDialog, HistoryPanel
 from ui_language import choice_text, error_text, install_chinese_translation
-from billing_cny import cny_summary, parse_cny_rates
+from billing_cny import cny_summary, parse_cny_rates, billing_details, USD_CNY
 from video_upload import needs_upload, source_expired
 from upload_library_view import UploadLibraryPanel
 from image_library_view import ImageLibraryPanel
@@ -39,6 +39,10 @@ from generation_queue_view import GenerationQueuePanel
 from agent_platforms import PLATFORMS
 from platform_login_view import PlatformLoginDialog
 from workspace_snapshot_view import WorkspaceSnapshotDialog
+from seedance_models import DEFAULT_VIDEO_MODEL, MODEL_SPECS, MODE_NAMES, state_spec, model_name, model_picker_identity
+from model_settings_view import ModelPricesDialog
+from billing_usage_view import BillingUsagePanel
+from single_instance import SingleInstance, activate_window
 import time
 
 
@@ -125,6 +129,9 @@ class SettingsDialog(QDialog):
         form.setVerticalSpacing(18)
         self.address = QLineEdit(controller.state["base_url"])
         form.addRow("Seedance 地址", self.address)
+        self.catalog_address = QLineEdit(controller.state.get('model_catalog_url', ''))
+        self.catalog_address.setPlaceholderText('留空则按接口地址自动获取模型列表')
+        form.addRow('模型列表地址', self.catalog_address)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("已加密保存；留空保留当前密钥" if controller.api_key else "填写 Seedance 接口密钥")
@@ -178,7 +185,7 @@ class SettingsDialog(QDialog):
         upload_layout.addWidget(self.upload_logout)
         form.addRow('视频上传账号',upload_row)
         self.cny_rates = {}
-        for kind, title in (('without_video','无视频输入单价'),('with_video','有视频输入单价')):
+        for kind, title in (('without_video','2.5 中转默认 · 无视频'),('with_video','2.5 中转默认 · 有视频')):
             field = QLineEdit(str(controller.state['cny_rates'].get(kind,'')))
             field.setPlaceholderText('元 / 百万计费单位；留空表示未设置')
             field.setToolTip('用于人民币参考费用估算；以中转站账单为准。')
@@ -189,6 +196,7 @@ class SettingsDialog(QDialog):
             price_layout.addWidget(field, 1)
             price_layout.addWidget(label('元 / 百万计费单位', 'Muted'))
             form.addRow(title, price_row)
+        form.addRow('', button('各模型 / 分辨率单价', 'Quiet', callback=lambda: ModelPricesDialog(controller, self).exec()))
         self.http = QCheckBox("允许当前明文中转连接")
         self.http.setChecked(controller.http_allowed() and controller.state["base_url"].startswith("http://"))
         self.http.setToolTip("该地址会以明文传输接口密钥和请求；确认仅对当前地址生效。")
@@ -258,17 +266,27 @@ class SettingsDialog(QDialog):
         controller = self.controller
         try:
             rates = parse_cny_rates({kind:field.text() for kind,field in self.cny_rates.items()})
+            if controller.state['cny_rates'].get('models'):
+                rates['models'] = controller.state['cny_rates']['models']
         except ValueError as error:
             QMessageBox.warning(self,'单价未保存',str(error))
             return
         address = self.address.text().strip().rstrip("/")
+        catalog_address = self.catalog_address.text().strip().rstrip('/')
+        try:
+            from seedance_client import SeedanceClient
+            SeedanceClient(address, self.key.text().strip() or controller.api_key or 'validate-settings',
+                           allow_http=self.http.isChecked(), model_catalog_url=catalog_address)
+        except ValueError as error:
+            QMessageBox.warning(self, '连接设置未保存', str(error))
+            return
         if self.key.text().strip():
             controller.api_key = self.key.text().strip()
             save_key(controller.api_key)
         if self.openai_key.text().strip():
             controller.openai_key = self.openai_key.text().strip()
             save_openai_key(controller.openai_key)
-        controller.state.update(base_url=address, download_dir=self.download_dir.text().strip(),
+        controller.state.update(base_url=address, model_catalog_url=catalog_address, download_dir=self.download_dir.text().strip(),
                                 cny_rates=rates,
                                 transcribe_audio=self.transcribe.isChecked(),
                                 allow_http_for=address if self.http.isChecked() else "")
@@ -462,7 +480,7 @@ class StudioWindow(QMainWindow):
         layout.addWidget(self.material_panel)
         layout.addWidget(self._composer(), 1)
         self.parameter_panel = self._parameters()
-        self.parameter_panel.setFixedWidth(268)
+        self.parameter_panel.setFixedWidth(300)
         layout.addWidget(self.parameter_panel)
         return page
 
@@ -613,11 +631,17 @@ class StudioWindow(QMainWindow):
         layout.setContentsMargins(19, 22, 19, 18)
         layout.setSpacing(20)
         layout.addWidget(label("生成设置", "Section"))
-        model = QHBoxLayout()
-        model.addWidget(label("Seedance 2.5", "Chip"), 1)
-        self.task_chip = label("参考生视频", "Small")
-        model.addWidget(self.task_chip)
-        layout.addLayout(model)
+        self.video_model = combo([])
+        self.video_model.setMinimumWidth(0)
+        self.video_model.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.video_model.setMinimumContentsLength(20)
+        self.video_model.setPlaceholderText('请选择模型')
+        self.video_model.fit_popup_to_contents = True
+        self.video_model.currentIndexChanged.connect(lambda: self.controller.set_value('generation_model', self.video_model.currentData()) if self.video_model.currentData() else None)
+        layout.addWidget(self.video_model)
+        self.model_status = label('', 'Small', True)
+        layout.addWidget(self.model_status)
+        self.task_chip = label('参考生视频', 'Small')
         body = QWidget()
         grid = QGridLayout(body)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -645,6 +669,10 @@ class StudioWindow(QMainWindow):
         advanced = QVBoxLayout(self.advanced)
         advanced.setContentsMargins(0, 0, 0, 0)
         advanced.setSpacing(13)
+        model_tools = QHBoxLayout()
+        model_tools.addWidget(button('刷新模型', 'Quiet', callback=self.refresh_video_models))
+        advanced.addLayout(model_tools)
+        advanced.addWidget(button('模型单价', 'Quiet', callback=lambda: ModelPricesDialog(self.controller, self).exec()))
         for key, text, values in (("output_format", "视频格式", ["mp4", "mov"]),):
             advanced.addWidget(label(text, "Small"))
             field = combo(values)
@@ -664,6 +692,8 @@ class StudioWindow(QMainWindow):
         layout.addWidget(scroll(body), 1)
         self.parameter_summary = label("", "Small", True)
         layout.addWidget(self.parameter_summary)
+        self.price_hint = label('', 'Small', True)
+        layout.addWidget(self.price_hint)
         self.generate_button = button("生成视频 · 付费", "Generate", "arrow", self.generate)
         layout.addWidget(self.generate_button)
         self.preview_button = button("预览请求", "Quiet", "eye", self.preview_request)
@@ -672,6 +702,50 @@ class StudioWindow(QMainWindow):
         self.download_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.download_chip)
         return container
+
+    def refresh_video_models(self):
+        try:
+            self.controller.refresh_generation_models()
+        except ValueError as error:
+            QMessageBox.warning(self, '模型列表未刷新', str(error))
+
+    def refresh_video_model_controls(self):
+        state = self.controller.state
+        with QSignalBlocker(self.video_model):
+            self.video_model.clear()
+            for identity in self.controller.generation_model_choices():
+                self.video_model.addItem(model_name(identity), identity)
+            chosen = self.video_model.findData(model_picker_identity(state['generation_model']))
+            # Old 2.5 drafts keep their exact routing and price group under one
+            # visible 2.5 entry. Do not rewrite queued or saved requests.
+            if chosen >= 0:
+                self.video_model.setItemData(chosen, state['generation_model'])
+            self.video_model.setCurrentIndex(chosen)
+        self.video_model.setToolTip(state['generation_model'])
+        try:
+            spec = state_spec(state)
+        except ValueError as error:
+            self.model_status.setText('请选择当前四个模型之一')
+            self.model_status.setToolTip(str(error))
+            return
+        mode = MODES[state['mode']]
+        choices = {
+            'resolution': spec.resolutions,
+            'duration': ['自适应' if n == -1 else f'{n} 秒' for n in spec.durations()],
+            'ratio': spec.ratios(mode),
+            'mode': [MODE_NAMES[m] for m in spec.modes],
+            'output_format': spec.formats,
+        }
+        for key, values in choices.items():
+            field = self.controls[key]
+            with QSignalBlocker(field):
+                field.clear()
+                for value in values:
+                    field.addItem(choice_text(value), value)
+        self.voice.setEnabled(spec.audio and not self.controller.busy)
+        self.voice.setToolTip('此模型不支持生成声音' if not spec.audio else '生成视频时附带声音。')
+        self.model_status.setText(self.controller.generation_model_availability() if chosen >= 0 else '旧模板模型已收起，请重新选择')
+        self.model_status.setToolTip(f'{spec.min_seconds}–{spec.max_seconds} 秒；模型是否可调用由所配置接口决定。可在更多参数中刷新接口状态。')
 
     def _library(self):
         page = card()
@@ -717,6 +791,8 @@ class StudioWindow(QMainWindow):
         content.setSpacing(18)
         top = QHBoxLayout()
         top.addWidget(label("用量与调用", "Section"), 1)
+        top.addWidget(button('同步中转用量', 'Quiet', callback=lambda: self.guarded(self.controller.refresh_billing_usage)))
+        top.addWidget(button('模型单价', 'Quiet', callback=lambda: ModelPricesDialog(self.controller, self).exec()))
         top.addWidget(button("导出用量", "Save", "download", self.export_usage))
         top.addWidget(button("调用记录", "Quiet", "file", self.show_calls))
         content.addLayout(top)
@@ -724,7 +800,8 @@ class StudioWindow(QMainWindow):
         content.addWidget(self.total_tokens)
         self.fee_note = label("", "Small", True)
         content.addWidget(self.fee_note)
-        content.addStretch()
+        self.billing_panel = BillingUsagePanel(self.controller)
+        content.addWidget(self.billing_panel, 1)
         layout.addWidget(detail, 1)
         return page
 
@@ -814,6 +891,7 @@ class StudioWindow(QMainWindow):
         if category in {"all", "assets", "draft"}:
             self.refresh_assets()
         if category in {"all", "parameters", "draft"}:
+            self.refresh_video_model_controls()
             self.refresh_usage()
             self.task_chip.setText({"全模态参考": "参考生视频", "纯文本": "文生视频", "首帧图片": "首帧生视频", "首尾帧图片": "首尾帧生视频"}[state["mode"]])
             for key, widget in self.controls.items():
@@ -826,7 +904,7 @@ class StudioWindow(QMainWindow):
             with QSignalBlocker(self.voice):
                 self.voice.setChecked(state["generate_audio"])
             duration = "自适应" if state["duration"] == "-1" else f"{state['duration']} 秒"
-            self.parameter_summary.setText(f"{state['resolution']} · {duration} · {choice_text(state['ratio'])}\n{'有声' if state['generate_audio'] else '无声'} · {choice_text(state['output_format'])}")
+            self.parameter_summary.setText(f"{model_name(state['generation_model'])}\n{choice_text(state['resolution'])} · {duration} · {choice_text(state['ratio'])}\n{'有声' if state['generate_audio'] else '无声'} · {choice_text(state['output_format'])}")
             self.download_chip.setToolTip(state["download_dir"])
         if category in {"all", "account", "models"}:
             active = self.controller.analysis_account()
@@ -838,6 +916,8 @@ class StudioWindow(QMainWindow):
             self.refresh_usage()
             self.waiting_samples = self.controller.history.completion_times()
             self.refresh_submission()
+        if category in {'usage', 'parameters'}:
+            self.refresh_usage()
         if category in {"all", "history"}:
             row = self.controller.row()
             if row:
@@ -853,6 +933,13 @@ class StudioWindow(QMainWindow):
             self.keyframe_button.setText((f"关键帧 · {count}" if count else f"分析画面 · {len(state['frame_catalog'])}") if state["frame_catalog"] else "分析画面")
             self.keyframe_button.setEnabled(bool(state["frame_catalog"]) and not self.controller.busy)
             self.refresh_generation()
+            settings = generation_settings(state, self.controller.assets)
+            content = [{'type': 'video_url'}] if any(a.selected and a.kind == 'video' and a.purpose != 'competitor'
+                                                     for a in self.controller.assets) else []
+            detail = billing_details({'model': settings['model'], 'request_json': {**settings, 'content': content}}, state['cny_rates'])
+            rate = detail['rate']
+            self.price_hint.setText(f"{detail['source']}：¥{rate:.2f} / ${rate / USD_CNY:.2f}\n每百万 tokens · 最终按实际用量"
+                                    if rate is not None else '单价待设置 · 生成后保留实际用量')
 
     def refresh_submission(self):
         call = self.controller.history.latest_submission()
@@ -989,13 +1076,15 @@ class StudioWindow(QMainWindow):
             if key == 'estimated_cost_cny':
                 continue
             value = summary.get(key) or 0
-            widget.setText(f"{value:,.2f}".rstrip("0").rstrip(".") if key == "seconds" else f"{value:,}")
-        fees = cny_summary(self.controller.history.rows(), self.controller.state['cny_rates'])
+            widget.setText(f"{value:,.1f}" if key == "seconds" else f"{value:,}")
+        records = self.controller.history.rows()
+        fees = cny_summary(records, self.controller.state['cny_rates'])
         self.metrics['estimated_cost_cny'].setText(f"{fees['amount']:,.2f}" if fees['amount'] is not None else '待设置')
-        note = f"已按当前人民币单价估算 {fees['priced']} 条成片；以中转站实际账单为准。"
+        note = f"已估算 {fees['priced']} 条成片；新任务保存提交时单价，旧任务按当前单价。1 美元 = 7 元；以中转实扣为准。"
         if fees['unpriced']:note += f"另有 {fees['unpriced']} 条缺少单价或用量，未计入金额。"
         self.fee_note.setText(note)
         self.total_tokens.setText(f"总计费单位  {summary['total_tokens'] or 0:,}    ·    任务  {summary['task_count'] or 0} 个")
+        self.billing_panel.refresh(records)
 
     def prompt_changed(self):
         text = self.prompt.toPlainText()
@@ -1007,8 +1096,13 @@ class StudioWindow(QMainWindow):
         self.refresh_submission()
         for widget in (self.ai_button, self.generate_button, self.mention_button, self.prompt, self.refine_result, self.clear_workspace_button):
             widget.setEnabled(not value)
-        for widget in (*self.controls.values(), self.voice):
+        for widget in (*self.controls.values(), self.voice, self.video_model):
             widget.setEnabled(not value)
+        if not value:
+            try:
+                self.voice.setEnabled(state_spec(self.controller.state).audio)
+            except ValueError:
+                self.voice.setEnabled(False)
         self.preview_button.setEnabled(True)
         self.keyframe_button.setEnabled(bool(self.controller.state['frame_catalog']))
         self.lock_material_controls(value)
@@ -1070,6 +1164,8 @@ class StudioWindow(QMainWindow):
 
     def generate(self):
         def action():
+            if not model_picker_identity(self.controller.state['generation_model']):
+                raise ValueError('这条旧模板的模型已不在当前菜单中，请先选择 2.5、2.0 Mini、2.0 Fast VIP 或 2.0 VIP。')
             if needs_video_analysis(self.controller.state, self.controller.assets):
                 self.controller.analyze()
                 return
@@ -1542,8 +1638,12 @@ def main(*, login_platform=None, start_services=True, quit_after_ms=None):
     application.setFont(QFont("Microsoft YaHei UI", 10))
     error_log, log_path = None, None
     controller = None
+    instance_guard = None
     try:
         APP_DIR.mkdir(parents=True, exist_ok=True)
+        instance_guard = SingleInstance(APP_DIR)
+        if not instance_guard.acquire_or_activate():
+            return 0
         error_log, log_path = open_error_log(APP_DIR)
         if error_log:
             faulthandler.enable(error_log)
@@ -1551,6 +1651,7 @@ def main(*, login_platform=None, start_services=True, quit_after_ms=None):
         if login_platform in PLATFORMS:
             controller.state['ai_provider'] = login_platform
         window = StudioWindow(controller, start_services=start_services)
+        instance_guard.activation_requested.connect(lambda: activate_window(window))
         window.show()
         window.fit_to_screen()
         if login_platform in PLATFORMS:
@@ -1576,6 +1677,8 @@ def main(*, login_platform=None, start_services=True, quit_after_ms=None):
         QMessageBox.critical(None, "工作室启动失败", message)
         result = 1
     finally:
+        if instance_guard:
+            instance_guard.close()
         if error_log:
             faulthandler.disable()
             error_log.close()

@@ -21,11 +21,11 @@ from agent_platforms import PLATFORMS, PlatformAccounts
 from agent_prompt import AgentPromptClient
 from request_records import compact_record
 from secure_store import load_key, load_openai_key, save_key, save_openai_key, load_protected_json, save_protected_json
-from seedance_client import DEFAULT_BASE_URL, CREATE_TIMEOUT_SECONDS, SeedanceClient, SubmissionUncertain, build_payload, download_video, model_alias
+from seedance_client import DEFAULT_BASE_URL, DEFAULT_MODEL_CATALOG_URL, LEGACY_BASE_URL, CREATE_TIMEOUT_SECONDS, SeedanceClient, SubmissionUncertain, build_payload, download_video, model_alias
 from error_diagnostics import exception_diagnostics
 from video_analysis import analysis_assets, analysis_signature, choose_keyframes, frame_catalog, keyframe_assets, needs_video_analysis, reference_videos
 from ui_language import error_text
-from billing_cny import DEFAULT_CNY_RATES, estimate_cny
+from billing_cny import DEFAULT_CNY_RATES, estimate_cny, billing_details, pricing_snapshot
 from generation_status import STATUS_NAMES
 from video_upload import UploadSession, needs_upload, source_expired
 from upload_library import UploadLibrary, record_status, local_copy
@@ -34,13 +34,18 @@ from generation_queue import GenerationQueue, ACTIVE as QUEUE_ACTIVE
 from reasoning_settings import EFFORT_LABELS, supported_efforts, selected_effort
 from prompt_policy import cleanup_reference, frames_for_generation, strip_analysis_references, enforce_edit_requirements, edit_requirements, logo_reference
 from workspace_snapshots import WorkspaceSnapshots, CONTENT_DEFAULTS, SNAPSHOT_KEYS, has_content
+from seedance_models import (DEFAULT_VIDEO_MODEL, MODEL_SPECS, MODE_NAMES, model_spec, model_name,
+                             resolve_model, state_spec, normalize_settings, valid_model_id, selection_from_payload,
+                             VISIBLE_VIDEO_MODELS)
 
 from app_paths import APP_DIR, DEFAULT_OUTPUT_DIR, open_error_log
 MODES = {"全模态参考": "reference", "首帧图片": "first_frame", "首尾帧图片": "first_last_frame", "纯文本": "text"}
 TASK_TYPES = {"参考生视频": "reference"}
 PURPOSE = {"competitor": "视频", "character": "角色", "scene": "场景", "storyboard": "分镜图", "first": "首帧", "last": "尾帧", "audio": "音频", "other": "参考", "keyframe": "关键帧"}
 DEFAULTS = {
-    "base_url": DEFAULT_BASE_URL, "mode": "全模态参考", "task_type": "参考生视频",
+    "generation_model": DEFAULT_VIDEO_MODEL, "generation_profile": "",
+    "custom_generation_models": {}, "generation_model_catalog": {},
+    "base_url": DEFAULT_BASE_URL, "model_catalog_url": DEFAULT_MODEL_CATALOG_URL, "mode": "全模态参考", "task_type": "参考生视频",
     "resolution": "720p", "duration": "5", "ratio": "16:9", "generate_audio": True,
     "watermark": False, "return_last_frame": False, "output_format": "mp4",
     "download_dir": str(DEFAULT_OUTPUT_DIR), "openai_model": DEFAULT_MODEL,
@@ -77,7 +82,9 @@ def load_assets(values: list[dict]) -> list[MediaAsset]:
 
 def generation_settings(state: dict, assets: list[MediaAsset]) -> dict:
     return {
-        "model": model_alias(state["resolution"], any(a.selected and a.kind == "video" and a.purpose != "competitor" for a in assets)),
+        "model": resolve_model(state.get('generation_model', DEFAULT_VIDEO_MODEL), state["resolution"], any(a.selected and a.kind == "video" and a.purpose != "competitor" for a in assets)),
+        "generation_model": state.get('generation_model', DEFAULT_VIDEO_MODEL),
+        "generation_profile": state.get('generation_profile', ''),
         "mode": MODES[state["mode"]], "task_type": "reference",
         **{key: state[key] for key in ("resolution", "ratio", "generate_audio", "watermark", "output_format", "return_last_frame")},
         "duration": int(state["duration"]),
@@ -106,6 +113,7 @@ def review_summary(state: dict, assets: list[MediaAsset]) -> str:
 
 def collect_payload(state: dict, assets: list[MediaAsset]) -> dict:
     settings = generation_settings(state, assets)
+    spec = state_spec(state)
     original = prompt_for_submission(state)
     if not frames_for_generation(state):
         original = strip_analysis_references(original, state.get('frame_catalog', []), assets,
@@ -134,8 +142,8 @@ def collect_payload(state: dict, assets: list[MediaAsset]) -> dict:
     compiled, images, videos, audios = compiled_mentions(original, selected)
     if any(not a.source_url for a in videos):
         raise ValueError("参考视频尚未上传，请在素材菜单上传视频或关联视频网址。")
-    if sum(a.duration or 0 for a in videos) > 30 or sum(a.duration or 0 for a in audios) > 30:
-        raise ValueError("参考视频或音频的总时长不能超过 30 秒。")
+    if sum(a.duration or 0 for a in videos) > spec.reference_seconds or sum(a.duration or 0 for a in audios) > spec.reference_seconds:
+        raise ValueError(f'{spec.name} 参考视频或音频的总时长不能超过 {spec.reference_seconds} 秒；请缩短素材或切换模型。')
     first = [a for a in images if a.purpose == "first"]
     last = [a for a in images if a.purpose == "last"]
     if mode == "first_frame" and (len(first) != 1 or last):
@@ -144,6 +152,7 @@ def collect_payload(state: dict, assets: list[MediaAsset]) -> dict:
         raise ValueError("首尾帧方式需要各一张首帧、尾帧图片。")
     source = lambda a: image_data_url(a.path) if a.path else a.source_url
     payload = build_payload(
+        model=state.get('generation_model', DEFAULT_VIDEO_MODEL), model_profile=state.get('generation_profile', ''),
         prompt=compiled, **{k: settings[k] for k in ("duration", "resolution", "ratio", "mode", "task_type",
                                                      "generate_audio", "watermark", "output_format", "return_last_frame")},
         image_sources=[source(a) for a in images if a.purpose not in {"first", "last"}],
@@ -196,7 +205,12 @@ class StudioController(QObject):
             saved = json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             saved = {}
-        self.state = {**DEFAULTS, **saved}
+        self.state = {**deepcopy(DEFAULTS), **saved}
+        if self.state['base_url'].rstrip('/') == LEGACY_BASE_URL:
+            self.state.update(base_url=DEFAULT_BASE_URL, model_catalog_url=DEFAULT_MODEL_CATALOG_URL, allow_http_for='')
+        elif 'model_catalog_url' not in saved and self.state['base_url'].rstrip('/') != DEFAULT_BASE_URL:
+            # Existing custom relays retain their model discovery behavior.
+            self.state['model_catalog_url'] = ''
         self.state['ai_models'] = deepcopy({provider: model for provider, model in (saved.get('ai_models') or {}).items()
                                            if provider in PLATFORMS and provider != 'chatgpt'})
         preferences = saved.get('ai_reasoning_efforts') or {}
@@ -209,6 +223,11 @@ class StudioController(QObject):
             self.state['ai_provider'] = 'chatgpt'
         self.state["task_type"] = "参考生视频"
         self.state["duration"] = str(self.state["duration"])
+        try:
+            normalize_settings(self.state)
+        except ValueError:
+            # Keep an unknown saved ID visible, requiring a template instead of silently using 2.5.
+            pass
         self.assets = load_assets(saved.get("assets", []))
         self.sync_keyframe_policy()
         self.api_key = load_key()
@@ -294,6 +313,10 @@ class StudioController(QObject):
         if self.state.get(name) == value:
             return
         self.state[name] = value
+        if name == 'generation_model':
+            self.state['generation_profile'] = self.state['custom_generation_models'].get(value, '')
+            changes = normalize_settings(self.state)
+            self.set_status('已切换至 ' + model_name(value) + ('，已调整' + '、'.join(changes) if changes else ''))
         if name == "mode":
             mode = MODES[value]
             if mode != "reference":
@@ -307,8 +330,67 @@ class StudioController(QObject):
                 if not allowed:
                     a.selected = False
             self.changed.emit("assets")
+        if name in {'generation_model', 'mode'}:
+            normalize_settings(self.state)
         self._save_timer.start(450)
         self.changed.emit("parameters" if name not in {"brief", "prompt"} else "text")
+
+    def add_generation_model(self, model, profile):
+        model = valid_model_id(model)
+        model_spec(model, profile)
+        self.state['custom_generation_models'][model] = profile
+        self.state['generation_profile'] = profile
+        self.state['generation_model'] = model
+        normalize_settings(self.state)
+        self.save()
+        self.changed.emit('parameters')
+
+    def remember_generation_profile(self):
+        model = self.state['generation_model']
+        profile = self.state.get('generation_profile', '')
+        if model not in MODEL_SPECS and profile in MODEL_SPECS:
+            self.state['custom_generation_models'][model] = profile
+
+    def generation_model_choices(self):
+        return list(VISIBLE_VIDEO_MODELS)
+
+    def generation_model_availability(self):
+        catalog = self.state.get('generation_model_catalog') or {}
+        if catalog.get('base_url') != self.state['base_url'].strip().rstrip('/'):
+            return '接口可用性待确认'
+        if catalog.get('model_catalog_url', '') != self.state.get('model_catalog_url', ''):
+            return '接口可用性待确认'
+        selected = generation_settings(self.state, self.assets)['model']
+        return '接口已列出此模型' if selected in catalog.get('models', []) else '当前接口未列出 · 需开通'
+
+    def refresh_generation_models(self):
+        if self.busy:
+            return
+        client = self.seedance_client()
+        address = client.base_url
+        catalog_address = self.state.get('model_catalog_url', '')
+        def received(models):
+            self.state['generation_model_catalog'] = {'base_url': address, 'model_catalog_url': catalog_address, 'models': models, 'checked_at': time.time()}
+            self.save()
+            self.changed.emit('parameters')
+            listed = sum(model in models for model in VISIBLE_VIDEO_MODELS)
+            self.set_status(f'已刷新 4 个可选模型，其中 {listed} 个已由接口列出。')
+        return self.start_job('generation_models', {'base_url': address, 'model_catalog_url': catalog_address}, client.list_models, received)
+
+    def billing_scope(self):
+        import hashlib
+        return hashlib.sha256((self.state['base_url'].strip().rstrip('/') + '\n' + self.api_key).encode()).hexdigest()
+
+    def refresh_billing_usage(self):
+        client = self.seedance_client()
+        scope = self.billing_scope()
+        def received(response):
+            self.state['relay_billing_usage'] = {'scope': scope, 'checked_at': time.time(), 'response': response}
+            self.save()
+            self.changed.emit('usage')
+            self.set_status('中转用量已同步；人民币按 1 美元 = 7 元换算。')
+        return self.start_job('billing_usage', {'base_url': client.base_url, 'days': 90, 'timezone': 'UTC'},
+                              client.get_usage, received, background=True)
 
     def save(self):
         self._save_timer.stop()
@@ -382,6 +464,10 @@ class StudioController(QObject):
         try:
             self.state.update(deepcopy(CONTENT_DEFAULTS))
             self.state.update({key: deepcopy(value) for key, value in state.items() if key in SNAPSHOT_KEYS})
+            if state:
+                self.state['generation_model'] = state.get('generation_model', DEFAULT_VIDEO_MODEL)
+                self.state['generation_profile'] = state.get('generation_profile', '')
+                self.remember_generation_profile()
             self.state['removed_assets'] = []
             self.assets = load_assets(assets)
             self.sync_keyframe_policy()
@@ -501,7 +587,8 @@ class StudioController(QObject):
             errors = []
             for path in paths:
                 suffix = Path(path).suffix.lower()
-                role = purpose or ("competitor" if suffix in {".mp4", ".mov", ".m4v", ".webm"} else "audio" if suffix in {".wav", ".mp3"} else "character" if not any(a.kind == "image" for a in existing + additions) else "other")
+                role = purpose or ("competitor" if suffix in {".mp4", ".mov", ".m4v", ".webm"}
+                                   else "audio" if suffix in {".wav", ".mp3"} else "other")
                 try:
                     asset = add_local_asset(path, role, existing + additions)
                     if asset.kind == 'video':
@@ -1086,7 +1173,7 @@ class StudioController(QObject):
             self.state["generated_keyframe_binding"] = ""
             self.state["frame_catalog"] = result["frames"]
             self.state["analysis"] = data["analysis"]
-            capacity = 30 - sum(a.selected and a.kind == "image" for a in analysis_assets(self.assets))
+            capacity = max(0, state_spec(self.state).images - sum(a.selected and a.kind == "image" for a in analysis_assets(self.assets)))
             mentioned = [f["handle"] for f in result["frames"] if f["handle"] in data["prompt"]]
             chosen = choose_keyframes(result["frames"], mentioned + data.get("keyframe_handles", []), capacity) if attach_frames else []
             if any(h not in chosen for h in mentioned):
@@ -1112,17 +1199,19 @@ class StudioController(QObject):
         return not address.startswith("http://") or self.state.get("allow_http_for") == address
 
     def seedance_client(self):
-        return SeedanceClient(self.state["base_url"], self.api_key, allow_http=self.http_allowed())
+        return SeedanceClient(self.state["base_url"], self.api_key, allow_http=self.http_allowed(),
+                              model_catalog_url=self.state.get('model_catalog_url', ''))
 
     def generation_snapshot(self, payload=None):
         payload = deepcopy(payload if payload is not None else collect_payload(self.state, self.assets))
-        keys = ('mode','task_type','resolution','duration','ratio','generate_audio','watermark',
+        keys = ('generation_model','generation_profile','mode','task_type','resolution','duration','ratio','generate_audio','watermark',
                 'return_last_frame','output_format','download_dir','brief','prompt','analysis',
                 'prompt_draft','frame_catalog','generated_keyframe_binding','ai_original_text',
                 'manual_prompt','auto_analyze','iteration_task_id','review_output','use_keyframes_for_generation')
         return {'payload': payload, 'assets': manifest(self.assets), 'mode': MODES[self.state['mode']],
+                'billing_rates': pricing_snapshot(self.state['cny_rates']),
                 'original_prompt': prompt_for_submission(self.state), 'parent_task_id': self.state['iteration_task_id'],
-                'template': deepcopy({key:self.state[key] for key in ('prompt_draft','frame_catalog',
+                'template': deepcopy({key:self.state[key] for key in ('generation_model','generation_profile','prompt_draft','frame_catalog',
                                     'generated_keyframe_binding','ai_original_text','manual_prompt','auto_analyze','use_keyframes_for_generation')}),
                 'settings': generation_settings(self.state, self.assets),
                 'state': deepcopy({key:self.state[key] for key in keys}),
@@ -1256,6 +1345,9 @@ class StudioController(QObject):
         elif item['status'] not in {'failed','succeeded','cancelled','unknown'}:
             raise ValueError('当前任务尚在处理中，完成后可载入再编辑。')
         self.state.update(deepcopy(item['snapshot']['state']))
+        self.state['generation_model'] = selection_from_payload(item['snapshot']['payload'], item['snapshot']['state'])
+        self.state['generation_profile'] = item['snapshot']['state'].get('generation_profile', '')
+        self.remember_generation_profile()
         self.state['auto_analyze'] = item['snapshot']['state'].get('auto_analyze',False)
         self.assets = load_assets(item['snapshot']['assets'])
         self.sync_keyframe_policy()
@@ -1285,7 +1377,8 @@ class StudioController(QObject):
             if task.get('id') != task_id or task.get('status') not in {'queued','running','succeeded','failed','cancelled','expired'}:
                 raise ValueError('接口未确认此任务编号，请核对中转站记录。')
             self.history.add(task_id,snapshot['payload'],snapshot['mode'],original_prompt=snapshot['original_prompt'],
-                             assets=snapshot['assets'],parent_task_id=snapshot['parent_task_id'],template=snapshot['template'])
+                             assets=snapshot['assets'],parent_task_id=snapshot['parent_task_id'],template=snapshot['template'],
+                             billing_rates=snapshot.get('billing_rates'))
             self.history.update(task)
             self.queue.update(identity,task_id=task_id,status='running',error='')
             self.state['task_id'] = task_id
@@ -1319,7 +1412,7 @@ class StudioController(QObject):
             if queue_id:
                 self.queue.update(queue_id,task_id=task_id,status='submitted')
             self.history.add(task_id, payload, mode, original_prompt=original, assets=assets, parent_task_id=parent,
-                             template=template, initial_status='submitted')
+                             template=template, initial_status='submitted', billing_rates=snapshot.get('billing_rates'))
             return task_id
 
         def received(task_id):
@@ -1515,6 +1608,8 @@ class StudioController(QObject):
             match=re.search(r'\n\n【关键帧参考】\n[^\n]*仅用于构图、动作与镜头顺序；替换角色的外观以角色图为准。$',prompt)
             binding=match.group(0) if match else ''
         self.state.update(
+            generation_model=selection_from_payload(payload, template),
+            generation_profile=template.get('generation_profile', ''),
             mode=next((name for name, code in MODES.items() if code == row["mode"]), "全模态参考"),
             task_type="参考生视频",
             duration=str(row["requested_duration"] or DEFAULTS['duration']), prompt=prompt, brief=prompt,
@@ -1529,6 +1624,9 @@ class StudioController(QObject):
             self.state[key] = row[key]
         for key in ("watermark", "return_last_frame", "generate_audio"):
             self.state[key] = payload.get(key, DEFAULTS[key])
+        if not state_spec(self.state).audio:
+            self.state['generate_audio'] = False
+        self.remember_generation_profile()
         self.assets = load_assets(json.loads(row["assets_json"]))
         self.sync_keyframe_policy()
         self.remember_images(self.assets)
@@ -1538,6 +1636,9 @@ class StudioController(QObject):
 
     def reuse_prompt(self, record):
         settings=record['settings']
+        self.state['generation_model'] = selection_from_payload(settings, settings)
+        self.state['generation_profile'] = settings.get('generation_profile', '')
+        self.remember_generation_profile()
         self.assets=load_assets(record['assets'])
         self.remember_images(self.assets)
         self.state.update(mode=next((name for name,code in MODES.items() if code==settings.get('mode')),'全模态参考'),
@@ -1550,7 +1651,7 @@ class StudioController(QObject):
             self.state[key]=settings.get(key,DEFAULTS[key])
         self.state['duration']=str(settings.get('duration',DEFAULTS['duration']))
         if frames_for_generation(self.state) and self.state['frame_catalog'] and all(Path(f['path']).is_file() for f in self.state['frame_catalog']):
-            capacity=30-sum(a.selected and a.kind=='image' for a in analysis_assets(self.assets))
+            capacity=max(0,state_spec(self.state).images-sum(a.selected and a.kind=='image' for a in analysis_assets(self.assets)))
             self.apply_keyframes(choose_keyframes(self.state['frame_catalog'],record['draft'].get('keyframe_handles',[]),capacity),notify=False)
         self.sync_keyframe_policy()
         self.save()
@@ -1559,18 +1660,25 @@ class StudioController(QObject):
 
     def export_csv(self, path):
         from ui_language import choice_text
-        fields = ("任务编号", "状态", "分辨率", "画面比例", "设定时长（秒）", "产出时长（秒）",
-                  "生成计费单位", "总计费单位", "参考费用（人民币元）", "费用状态", "本地视频位置")
+        fields = ("任务编号", "状态", "生成模型", "分辨率", "画面比例", "设定时长（秒）", "产出时长（秒）",
+                  "生成计费单位", "总计费单位", "参考费用（人民币元）", "费用状态", "本地视频位置",
+                  "参考费用（美元）", "每秒费用（人民币元）", "单价（人民币元每百万tokens）", "视频输入", "接口返回模型", "实际分辨率")
         with Path(path).open("w", encoding="utf-8-sig", newline="") as output:
             writer = csv.DictWriter(output, fields)
             writer.writeheader()
             for row in self.history.rows():
-                amount = estimate_cny(row, self.state['cny_rates'])
-                values = dict(zip(fields, (row['task_id'], STATUS_NAMES.get(row['status'],'待核对'), row['resolution'],
+                detail = billing_details(row, self.state['cny_rates'])
+                amount = detail['amount']
+                values = dict(zip(fields, (row['task_id'], STATUS_NAMES.get(row['status'],'待核对'), row['model'], row['resolution'],
                                          choice_text(row['ratio']), '自适应' if row['requested_duration']==-1 else row['requested_duration'],
                                          row['actual_duration'], row['completion_tokens'], row['total_tokens'],
                                          format(amount,'.2f') if amount is not None else '',
-                                         '按当前单价估算' if amount is not None else '未估算', row['local_path'])))
+                                         detail['reason'], row['local_path'],
+                                         format(detail['usd'], '.2f') if detail['usd'] is not None else '',
+                                         format(detail['per_second'], '.2f') if detail['per_second'] is not None else '',
+                                         format(detail['rate'], '.2f') if detail['rate'] is not None else '',
+                                         {'with_video':'有', 'without_video':'无'}.get(detail['kind'], '未记录'),
+                                         detail['actual_model'], row.get('actual_resolution') or '')))
                 safe = {k: ("'" + v if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@")) else v) for k, v in values.items()}
                 writer.writerow(safe)
 

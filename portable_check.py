@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -69,6 +70,29 @@ def main():
             window = StudioWindow(controller, start_services=False)
             window.show(); window.fit_to_screen(); window.resize(1280, 800); application.processEvents()
             report['checks']['window'] = not window.isMaximized() and window.rect().contains(window.generate_button.mapTo(window, window.generate_button.rect().bottomRight()))
+            from single_instance import SingleInstance, activate_window
+            guard = SingleInstance(home / 'instance-check')
+            try:
+                report['checks']['single_instance_lock'] = guard.acquire_or_activate()
+                guard.activation_requested.connect(lambda: activate_window(window))
+                window.showMinimized(); application.processEvents()
+                secondary = subprocess.Popen([actual_executable, '--activate-instance', str(home / 'instance-check')],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                deadline = time.monotonic() + 15
+                while secondary.poll() is None and time.monotonic() < deadline:
+                    application.processEvents(); time.sleep(.01)
+                if secondary.poll() is None:
+                    secondary.kill(); secondary.wait(timeout=5)
+                    raise RuntimeError('第二个 EXE 的启动检查超时。')
+                application.processEvents()
+                report['checks']['single_instance_repeat_blocked'] = secondary.returncode == 0
+                report['checks']['single_instance_window_restored'] = not window.isMinimized()
+            finally:
+                guard.close()
+            reopened = SingleInstance(home / 'instance-check')
+            report['checks']['single_instance_reopen'] = reopened.acquire_or_activate()
+            reopened.close()
             controller.state['prompt'] = '独立便携版保存测试'; controller.save()
             report['checks']['save_draft'] = json.loads(controller.state_file.read_text(encoding='utf-8'))['prompt'] == '独立便携版保存测试'
             report['checks']['clean_profile'] = not controller.api_key and not controller.openai_key and not controller.analysis_account() and not controller.history.rows()
@@ -82,6 +106,19 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     return 0 if report['success'] else 1
+
+
+def activate_instance_check():
+    """Offline secondary EXE probe; no controller, accounts or network services."""
+    directory = Path(sys.argv[sys.argv.index('--activate-instance') + 1]).resolve()
+    from PySide6.QtCore import QCoreApplication
+    from single_instance import SingleInstance
+    application = QCoreApplication.instance() or QCoreApplication([])
+    guard = SingleInstance(directory)
+    try:
+        return 2 if guard.acquire_or_activate() else 0
+    finally:
+        guard.close()
 
 
 def startup_check():

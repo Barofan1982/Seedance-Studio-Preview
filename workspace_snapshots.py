@@ -19,7 +19,7 @@ CONTENT_DEFAULTS = {
     'iteration_task_id': '', 'review_output': False, 'frame_catalog': [],
     'generated_keyframe_binding': '', 'use_keyframes_for_generation': False, 'manual_prompt': False,
 }
-SETTING_KEYS = ('mode', 'task_type', 'resolution', 'duration', 'ratio', 'generate_audio',
+SETTING_KEYS = ('generation_model', 'generation_profile', 'mode', 'task_type', 'resolution', 'duration', 'ratio', 'generate_audio',
                 'watermark', 'return_last_frame', 'output_format', 'auto_analyze', 'transcribe_audio')
 SNAPSHOT_KEYS = tuple(CONTENT_DEFAULTS) + SETTING_KEYS
 

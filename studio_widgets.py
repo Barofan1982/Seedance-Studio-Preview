@@ -233,6 +233,24 @@ class StudioComboBox(QComboBox):
         popup.setObjectName("ComboPopup")
         popup.setStyleSheet(COMBO_POPUP_STYLE)
         popup.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+        self.fit_popup_to_contents = False
+
+    def showPopup(self):
+        if not self.fit_popup_to_contents:
+            return super().showPopup()
+        view = self.view()
+        view.ensurePolished()
+        screen = self.screen().availableGeometry()
+        text_width = max((view.fontMetrics().horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        width = min(max(self.width(), 320, text_width + 64), screen.width() - 16)
+        view.setMinimumWidth(width)
+        view.setTextElideMode(Qt.TextElideMode.ElideNone)
+        super().showPopup()
+        popup = view.window()
+        rect = popup.geometry()
+        rect.setWidth(min(max(rect.width(), width), screen.width() - 16))
+        rect.moveLeft(max(screen.left() + 8, min(rect.left(), screen.right() - rect.width() - 7)))
+        popup.setGeometry(rect)
 
 
 class PromptEditor(QTextEdit):
@@ -669,7 +687,8 @@ class KeyframeDialog(QDialog):
         grid = QGridLayout(body)
         grid.setSpacing(12)
         selected = {a.handle for a in controller.assets if a.purpose == "keyframe" and a.selected}
-        self.capacity = 30 - sum(a.selected and a.kind == "image" and a.purpose != "keyframe" for a in controller.assets)
+        from seedance_models import state_spec
+        self.capacity = max(0, state_spec(controller.state).images - sum(a.selected and a.kind == "image" and a.purpose != "keyframe" for a in controller.assets))
         self.choices = {}
         from media_assets import MediaAsset
         for index, frame in enumerate(controller.state["frame_catalog"]):

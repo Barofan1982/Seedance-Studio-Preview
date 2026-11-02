@@ -16,9 +16,10 @@ class CnyBillingTests(unittest.TestCase):
         self.assertEqual(totals,{'amount':Decimal('28'),'priced':2,'unpriced':0})
 
     def test_missing_rates_or_usage_are_not_treated_as_zero_cost(self):
-        self.assertIsNone(estimate_cny(self.record(True),{}))
+        unpriced = {'models': {'seedance-2.5-auto': {'720p': {}}}}
+        self.assertIsNone(estimate_cny(self.record(True),unpriced))
         self.assertIsNone(estimate_cny(self.record(True,tokens=None),DEFAULT_CNY_RATES))
-        self.assertIsNone(cny_summary([self.record(True)],{})['amount'])
+        self.assertIsNone(cny_summary([self.record(True)],unpriced)['amount'])
         self.assertEqual(estimate_cny(self.record(True),{'with_video':0}),Decimal(0))
         for tokens in (-1,True,float('nan'),float('inf')):
             self.assertIsNone(estimate_cny(self.record(True,tokens=tokens),DEFAULT_CNY_RATES))

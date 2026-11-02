@@ -6,9 +6,10 @@ import re
 from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
 
 
-CHOICE_NAMES = {'adaptive': '自适应', 'mp4': 'MP4', 'mov': 'MOV'}
+CHOICE_NAMES = {'adaptive': '自适应', 'mp4': 'MP4', 'mov': 'MOV', '4k': '4K'}
 
 FIELD_NAMES = {
+    'generation_model': '生成模型', 'generation_profile': '模型参数模板',
     'reasoning':'思考配置', 'effort':'思考强度', 'reasoning_effort':'思考强度',
     'ai_reasoning_effort':'分析思考强度', 'ai_reasoning_efforts':'各模型思考强度', 'thinking':'思考模式',
     'connection_route':'网络路径', 'proxy_address':'代理地址', 'input_image_count':'分析图片数量',
@@ -63,6 +64,8 @@ FIELD_NAMES = {
 }
 
 ENUM_NAMES = {
+    'generation_models': '读取视频模型列表',
+    'billing_usage': '同步中转计费用量',
     'api_key': '接口密钥',
     'reference':'参考生视频', 'first_frame':'首帧', 'first_last_frame':'首尾帧', 'last_frame':'尾帧',
     'reference_image':'参考图片', 'reference_video':'参考视频', 'reference_audio':'参考音频',
@@ -101,8 +104,9 @@ def parameter_value(value, key=''):
         return text.replace('OpenAI API 单独计费', 'OpenAI 接口单独计费')
     if key in {'error', 'reason'} and text:
         return error_text(text)
-    if key == 'model' and text.startswith('seedance-2.5-'):
-        return 'Seedance 2.5 · ' + ('有视频参考' if 'with-video' in text else '无视频参考')
+    if key in {'model', 'generation_model', 'generation_profile'}:
+        from seedance_models import model_name
+        return model_name(text)
     if key in {'type', 'role', 'mode', 'purpose', 'kind', 'status', 'operation', 'auth_mode', 'phase', 'visibility', 'service_tier', 'method'}:
         return ENUM_NAMES.get(text, choice_text(text))
     if key in {'ratio', 'output_format'}:

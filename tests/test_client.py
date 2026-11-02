@@ -107,7 +107,7 @@ class ClientTests(unittest.TestCase):
                 detail = failure.exception.diagnostics
                 self.assertEqual(detail["phase"], "opening_connection_or_sending_request")
                 self.assertIsNone(detail["http_status"])
-                self.assertEqual(detail["timeout_seconds"], 300)
+                self.assertEqual(detail["timeout_seconds"], 600)
                 self.assertEqual(detail["request_body_bytes"], len(json.dumps(payload,ensure_ascii=False).encode("utf-8")))
                 self.assertNotIn("dummy-key", json.dumps(detail))
                 self.assertEqual(opener.open.call_count, 1)

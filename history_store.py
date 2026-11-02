@@ -57,6 +57,9 @@ class HistoryStore:
                 connection.execute("ALTER TABLE tasks ADD COLUMN media_json TEXT NOT NULL DEFAULT '{}'")
             if "template_json" not in columns:
                 connection.execute("ALTER TABLE tasks ADD COLUMN template_json TEXT NOT NULL DEFAULT '{}'")
+            for name, default in (("actual_model", ""), ("actual_resolution", ""), ("billing_rates_json", "{}")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
                     call_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,14 +81,14 @@ class HistoryStore:
 
     def add(self, task_id: str, payload: dict, mode: str = "reference", *,
             original_prompt: str = "", assets: list[dict] | None = None, parent_task_id: str = "",
-            template: dict | None = None, initial_status: str = 'queued') -> None:
+            template: dict | None = None, initial_status: str = 'queued', billing_rates: dict | None = None) -> None:
         prompt = next((item.get("text", "") for item in payload.get("content", []) if item.get("type") == "text"), "")
         with self._connect() as connection:
             connection.execute("""
                 INSERT OR IGNORE INTO tasks
                 (task_id, created_at, model, mode, task_type, resolution, ratio, output_format,
-                 requested_duration, status, prompt, request_json, assets_json, original_prompt, parent_task_id, template_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 requested_duration, status, prompt, request_json, assets_json, original_prompt, parent_task_id, template_json, billing_rates_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task_id, int(time.time()), payload["model"], mode,
                 payload.get("omni_reference_task_type", "reference"), payload["resolution"], payload["ratio"],
@@ -94,6 +97,7 @@ class HistoryStore:
                 json.dumps(compact_record(payload), ensure_ascii=False),
                 json.dumps(assets or [], ensure_ascii=False), original_prompt or prompt, parent_task_id,
                 json.dumps(compact_record(template or {}), ensure_ascii=False),
+                json.dumps(billing_rates or {}, ensure_ascii=False),
             ))
 
     def begin_call(self, operation: str, request: dict, task_id: str = "", secrets: tuple[str, ...] = ()) -> int:
@@ -304,15 +308,19 @@ class HistoryStore:
                 UPDATE tasks SET status=?, actual_duration=COALESCE(?, actual_duration),
                     completion_tokens=COALESCE(?, completion_tokens), total_tokens=COALESCE(?, total_tokens),
                     estimated_cost_usd=COALESCE(?, estimated_cost_usd),
-                    video_url=CASE WHEN ? != '' THEN ? ELSE video_url END, error=?
+                    video_url=CASE WHEN ? != '' THEN ? ELSE video_url END, error=?,
+                    actual_model=COALESCE(NULLIF(?, ''), actual_model),
+                    actual_resolution=COALESCE(NULLIF(?, ''), actual_resolution)
                 WHERE task_id=?
             """, (
                 str(task.get("status", "unknown")), actual_duration,
-                completion if isinstance(completion, int) else None,
-                total if isinstance(total, int) else None,
+                completion if type(completion) is int and completion >= 0 else None,
+                total if type(total) is int and total >= 0 else None,
                 cost, str(content.get("video_url", "")), str(content.get("video_url", "")),
                 json.dumps(compact_record(task['error']), ensure_ascii=False) if isinstance(task.get('error'), (dict,list)) else
-                str(compact_record(task.get('error') or '')), task_id,
+                str(compact_record(task.get('error') or '')),
+                task.get('model') if isinstance(task.get('model'), str) else '',
+                task.get('resolution') if task.get('resolution') in ('480p', '720p', '1080p', '4k') else '', task_id,
             ))
 
     def rows(self) -> list[dict]:

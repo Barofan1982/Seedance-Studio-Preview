@@ -10,7 +10,7 @@ from history_outcomes import record_outcome
 from studio_controller import neutral_video_text
 from studio_widgets import Preview,StudioComboBox,button,cached_thumbnail,card,label,scroll
 from ui_language import choice_text,error_text
-from billing_cny import estimate_cny
+from billing_cny import billing_text
 from error_details_view import ErrorDetailsDialog, related_calls
 
 TZ=datetime.timezone(datetime.timedelta(hours=8))
@@ -45,9 +45,10 @@ def record_date(record):
 
 
 def record_settings(record):
+    from seedance_models import model_name
     values=record.get('settings') or json.loads(record.get('request_json') or '{}')
     duration=values.get('duration',record.get('requested_duration'))
-    return ' · '.join(str(v) for v in (values.get('resolution',record.get('resolution','')),
+    return ' · '.join(str(v) for v in (model_name(values.get('generation_model') or values.get('model', record.get('model',''))), values.get('resolution',record.get('resolution','')),
                      '自适应' if duration in {-1,'-1'} else f'{duration} 秒' if duration else '',
                      choice_text(values.get('ratio',record.get('ratio',''))),
                      '有声' if values.get('generate_audio') else '无声',values.get('output_format','mp4').upper()) if v)
@@ -89,8 +90,8 @@ class HistoryDetailDialog(QDialog):
             usage=f"产出 {record['actual_duration']:.2f} 秒"
             if record.get('total_tokens') is not None:usage+=f" · 计费单位 {record['total_tokens']:,} 个"
             layout.addWidget(label(usage,'Small'))
-        amount=estimate_cny(record,controller.state['cny_rates'])
-        if amount is not None:layout.addWidget(label(f'参考费用：约 {amount:.2f} 元人民币（按当前单价估算）','Small'))
+        if record.get('record_kind') == 'task':
+            layout.addWidget(label(billing_text(record,controller.state['cny_rates']), 'Small', True))
         path=Path(record['local_path']) if record.get('local_path') else None
         if outcome.file_available:
             layout.addWidget(Preview(cached_thumbnail(path,controller.directory),150,callback=lambda:play(record)))

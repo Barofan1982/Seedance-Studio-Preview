@@ -15,10 +15,15 @@ from pathlib import Path
 from request_records import compact_record
 from error_diagnostics import MAX_ERROR_BYTES, error_fields, response_snapshot
 from direct_network import direct_handlers, BeforeSendConnectionError, CONNECT_TIMEOUT_SECONDS
+from seedance_models import DEFAULT_VIDEO_MODEL, RELAY_ALIAS, model_spec, resolve_model
 
 
-DEFAULT_BASE_URL = "http://43.153.91.218:8088/api/v3"
+LEGACY_BASE_URL = "http://43.153.91.218:8088/api/v3"
+DEFAULT_BASE_URL = "https://ai-middle.miaoziz.com/v1"
+DEFAULT_MODEL_CATALOG_URL = "https://ai-middle.miaoziz.com/v1/models"
 CREATE_TIMEOUT_SECONDS = 600
+DOWNLOAD_TIMEOUT_SECONDS = 300
+DOWNLOAD_ATTEMPTS = 2
 RESOLUTIONS = ("480p", "720p", "1080p")
 RATIOS = ("16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive")
 MODES = ("reference", "first_frame", "first_last_frame", "text")
@@ -129,22 +134,36 @@ def build_payload(
     return_last_frame: bool = False,
     seed: int | None = None,
     camera_fixed: bool | None = None,
+    model: str = DEFAULT_VIDEO_MODEL,
+    model_profile: str = '',
 ) -> dict:
     prompt = prompt.strip()
+    spec = model_spec(model, model_profile)
     if mode not in MODES:
         raise ValueError("生成方式无效。")
+    if mode not in spec.modes:
+        raise ValueError(f'{spec.name} 不支持当前生成方式，请切换模型或生成方式。')
     if task_type not in TASK_TYPES:
         raise ValueError("全模态任务类型无效。")
-    if not isinstance(duration, int) or isinstance(duration, bool) or duration != -1 and not 4 <= duration <= 30:
-        raise ValueError("Seedance 2.5 时长必须是 4–30 秒，或选择自适应时长（传入 -1）。")
-    if ratio not in RATIOS:
-        raise ValueError("请选择有效的画面比例。")
+    if not isinstance(duration, int) or isinstance(duration, bool) or duration not in spec.durations():
+        raise ValueError(f'{spec.name} 时长必须是 {spec.min_seconds}–{spec.max_seconds} 秒' +
+                         ('，或选择自适应时长（传入 -1）。' if spec.adaptive else '，不支持自适应时长。'))
+    if resolution not in spec.resolutions:
+        raise ValueError(f'{spec.name} 支持的分辨率为：' + '、'.join(spec.resolutions) + '。')
+    if ratio not in spec.ratios(mode):
+        raise ValueError(f'{spec.name} 当前方式支持的画面比例为：' + '、'.join(spec.ratios(mode)).replace('adaptive', '自适应') + '。')
     if not isinstance(generate_audio, bool) or not isinstance(watermark, bool) or not isinstance(return_last_frame, bool):
         raise ValueError("声音、水印和返回尾帧参数必须是开关值。")
-    if output_format not in ("mp4", "mov"):
-        raise ValueError("输出格式只能是 MP4 或 MOV。")
-    if seed is not None or camera_fixed is not None:
-        raise ValueError("随机种子和固定镜头仅支持 Seedance 1.0，Seedance 2.5 不接受这两个参数。")
+    if output_format not in spec.formats:
+        raise ValueError(f'{spec.name} 支持的输出格式为：' + '、'.join(spec.formats).upper() + '。')
+    if not spec.audio and generate_audio:
+        raise ValueError(f'{spec.name} 不支持生成声音，请关闭声音选项。')
+    if not spec.seed and (seed is not None or camera_fixed is not None):
+        raise ValueError(f'{spec.name} 不接受随机种子和固定镜头参数。')
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not -1 <= seed <= 2**32 - 1):
+        raise ValueError('随机种子必须是 -1 到 4294967295 之间的整数。')
+    if camera_fixed is not None and not isinstance(camera_fixed, bool):
+        raise ValueError('固定镜头参数必须是开关值。')
     images = list(image_sources or [])
     videos = list(video_sources or [])
     audios = list(audio_sources or [])
@@ -155,8 +174,12 @@ def build_payload(
     images = [_image_source(source) for source in images]
     videos = [_video_source(source) for source in videos]
     audios = [_audio_source(source) for source in audios]
-    if len(images) > 30 or len(videos) > 10 or len(audios) > 10 or len(images) + len(videos) + len(audios) > 50:
-        raise ValueError("Seedance 2.5 最多支持 30 张图片、10 段视频、10 段音频，总计 50 个参考素材。")
+    if len(images) > spec.images or len(videos) > spec.videos or len(audios) > spec.audios or len(images) + len(videos) + len(audios) > spec.total_media:
+        raise ValueError(f'{spec.name} 最多支持 {spec.images} 张参考图片、{spec.videos} 段参考视频、{spec.audios} 段参考音频，总计 {spec.total_media} 个参考素材。')
+    if audios and not (images or videos) and not spec.audio_only:
+        raise ValueError(f'{spec.name} 不支持仅参考音频，请同时提供图片或视频。')
+    if task_type != 'reference' and not spec.task_type_field:
+        raise ValueError(f'{spec.name} 不支持指定编辑或延长任务类型。')
     if mode != "reference" and task_type != "reference":
         raise ValueError("视频编辑和延长仅适用于全模态参考方式。")
     if mode in ("first_frame", "first_last_frame"):
@@ -168,8 +191,6 @@ def build_payload(
             raise ValueError("首尾帧方式还需选择尾帧图片。")
         if mode == "first_frame" and last_frame:
             raise ValueError("首帧方式不能包含尾帧图片。")
-        if ratio != "adaptive":
-            raise ValueError("首帧/首尾帧方式的画面比例必须选择自适应。")
     elif first_frame or last_frame:
         raise ValueError("首帧与尾帧图片只用于首帧/首尾帧方式。")
     if mode == "text" and (images or videos or audios):
@@ -200,23 +221,32 @@ def build_payload(
         if last_frame:
             content.append({"type": "image_url", "image_url": {"url": _image_source(last_frame)}, "role": "last_frame"})
     result = {
-        "model": model_alias(resolution, bool(videos)),
+        "model": resolve_model(model, resolution, bool(videos)),
         "content": content,
         "duration": duration,
         "resolution": resolution,
         "ratio": ratio,
-        "generate_audio": generate_audio,
         "watermark": watermark,
-        "output_format": output_format,
         "return_last_frame": return_last_frame,
     }
-    if mode == "reference" and (images or videos or audios):
+    alias = RELAY_ALIAS.fullmatch(result['model'])
+    if alias and result['model'] != model_alias(resolution, bool(videos)):
+        raise ValueError('所选中转模型档位与分辨率或视频参考不匹配，请选择“中转自动档位”或匹配的模型 ID。')
+    if spec.audio:
+        result['generate_audio'] = generate_audio
+    if spec.task_type_field:
+        result['output_format'] = output_format
+    if seed is not None:
+        result['seed'] = seed
+    if camera_fixed is not None:
+        result['camera_fixed'] = camera_fixed
+    if spec.task_type_field and mode == "reference" and (images or videos or audios):
         result["omni_reference_task_type"] = task_type
     return result
 
 
 class SeedanceClient:
-    def __init__(self, base_url: str, api_key: str, *, allow_http: bool = False):
+    def __init__(self, base_url: str, api_key: str, *, allow_http: bool = False, model_catalog_url: str = ""):
         self.base_url = base_url.strip().rstrip("/")
         self.api_key = api_key.strip()
         parsed = urllib.parse.urlsplit(self.base_url)
@@ -224,17 +254,29 @@ class SeedanceClient:
             raise ValueError("请填写接口密钥。")
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("接口地址必须是有效的网络地址。")
-        if parsed.path.rstrip("/") != "/api/v3" or parsed.query or parsed.fragment:
-            raise ValueError("接口地址应以 /api/v3 结尾。")
+        if parsed.path.rstrip("/") not in {"/api/v3", "/v1"} or parsed.query or parsed.fragment:
+            raise ValueError("接口地址应以 /v1 或 /api/v3 结尾。")
+        self.model_catalog_url = model_catalog_url.strip().rstrip('/')
+        if self.model_catalog_url:
+            catalog = urllib.parse.urlsplit(self.model_catalog_url)
+            if (catalog.scheme, catalog.netloc) != (parsed.scheme, parsed.netloc) or catalog.path not in {'/v1/models','/api/v3/models'} or catalog.query or catalog.fragment:
+                raise ValueError('模型列表地址须与接口地址使用同一站点，并以 /v1/models 或 /api/v3/models 结尾。')
         if parsed.scheme == "http" and not allow_http:
             raise ValueError("当前连接会明文传输密钥；请先确认继续使用该地址。")
 
-    def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, payload: dict | None = None, *, origin_path: bool = False) -> dict:
+        endpoint = self.base_url + path
+        if origin_path:
+            if path not in {'/v1/models', '/api/v3/models', '/v1/usage?days=90&timezone=UTC'}:
+                raise ValueError('不支持的只读接口路径。')
+            parsed = urllib.parse.urlsplit(self.base_url)
+            target = urllib.parse.urlsplit(path)
+            endpoint = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, target.path, target.query, ''))
         data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if data is not None and len(data) > 64 * 1024 * 1024:
             raise ValueError("请求体超过 64 MB，请减少或压缩参考图片。")
         request = urllib.request.Request(
-            self.base_url + path,
+            endpoint,
             data=data,
             method=method,
             headers={
@@ -251,7 +293,7 @@ class SeedanceClient:
         raw = b''
         def diagnostic(**extra):
             return compact_record({
-                'method': method, 'endpoint': self.base_url + path, 'phase': phase,
+                'method': method, 'endpoint': endpoint, 'phase': phase,
                 'http_status': http_status, 'response_ids': response_ids, 'timeout_seconds': timeout,
                 'elapsed_ms': round((time.monotonic() - started) * 1000),
                 'request_body_bytes': len(data) if data is not None else 0, **extra,
@@ -334,6 +376,28 @@ class SeedanceClient:
         self.last_response_diagnostics = trace
         return result
 
+    def list_models(self) -> list[str]:
+        if self.model_catalog_url:
+            result = self._request('GET', urllib.parse.urlsplit(self.model_catalog_url).path, origin_path=True)
+        else:
+            try:
+                result = self._request('GET', '/models')
+            except SeedanceError as error:
+                if error.diagnostics.get('http_status') != 404:
+                    raise
+                result = self._request('GET', '/v1/models', origin_path=True)
+        items = result.get('data', result.get('items', result.get('models')))
+        if not isinstance(items, list):
+            raise SeedanceError('模型列表格式无法识别；仍可手动添加模型 ID。')
+        return sorted({item if isinstance(item, str) else item['id']
+                       for item in items if isinstance(item, str) or isinstance(item, dict) and isinstance(item.get('id'), str)})
+
+    def get_usage(self) -> dict:
+        result = self._request('GET', '/v1/usage?days=90&timezone=UTC', origin_path=True)
+        if not isinstance(result.get('model_stats'), list):
+            raise SeedanceError('接口未提供按模型的用量记录，人民币参考估算仍可查看。')
+        return result
+
     def create_task(self, payload: dict) -> str:
         result = self._request("POST", "/contents/generations/tasks", payload)
         task_id = result.get("id")
@@ -378,35 +442,63 @@ def download_video(url: str, destination: Path) -> None:
     destination = Path(destination)
     temporary = destination.with_name(destination.name + ".part")
     started = time.monotonic()
-    phase = 'opening_connection_or_sending_request'
-    http_status = None
-    response_headers = {}
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "SeedanceVideoGenerator/1.0"})
-        with urllib.request.build_opener(_HttpsVideoRedirects()).open(request, timeout=60) as response:
-            http_status, response_headers, phase = response.status, response.headers, 'reading_response'
-            _public_https_url(response.geturl(), "重定向后的视频链接")
-            phase = 'writing_output'
-            with temporary.open("wb") as output:
-                while True:
-                    phase = 'reading_response'
-                    chunk = response.read(1024 * 1024)
-                    if not chunk: break
-                    phase = 'writing_output'
-                    output.write(chunk)
-        phase = 'finalizing_file'
-        temporary.replace(destination)
-    except Exception as error:
-        temporary.unlink(missing_ok=True)
-        if isinstance(error, ValueError): raise
-        trace = {'method':'GET', 'endpoint':compact_record(url), 'phase':phase, 'http_status':http_status,
-                 'timeout_seconds':60, 'elapsed_ms':round((time.monotonic()-started)*1000),
-                 'error_type':type(error).__name__, 'reason':str(error), 'errno':getattr(error,'errno',None)}
-        if isinstance(error, urllib.error.HTTPError):
-            try: raw = error.read(MAX_ERROR_BYTES + 1)
-            except (OSError, http.client.HTTPException): raw = b''
-            finally: error.close()
-            trace.update(response_snapshot(raw,error.headers,error.code))
-        else:
-            trace['response_ids'] = response_snapshot(b'',response_headers,http_status)['response_ids']
-        raise SeedanceError(f'下载或保存成片失败：{error}', diagnostics=trace) from error
+    attempts = []
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        phase = 'opening_connection_or_sending_request'
+        http_status = None
+        response_headers = {}
+        received_bytes = 0
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "SeedanceVideoGenerator/1.0"})
+            # Downloads use the same 300-second timeout for connection and reads.
+            # The API's direct handlers have a separate 30-second connect limit.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _HttpsVideoRedirects())
+            with opener.open(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                http_status, response_headers, phase = response.status, response.headers, 'reading_response'
+                _public_https_url(response.geturl(), "重定向后的视频链接")
+                length = response.headers.get('Content-Length', '')
+                expected_bytes = int(length) if length.isdecimal() else None
+                phase = 'writing_output'
+                with temporary.open("wb") as output:
+                    while True:
+                        phase = 'reading_response'
+                        chunk = response.read(1024 * 1024)
+                        if not chunk: break
+                        phase = 'writing_output'
+                        output.write(chunk)
+                        received_bytes += len(chunk)
+                phase = 'reading_response'
+                if not received_bytes or (expected_bytes is not None and received_bytes != expected_bytes):
+                    raise http.client.IncompleteRead(b'', max(1, (expected_bytes or 0) - received_bytes))
+            phase = 'finalizing_file'
+            temporary.replace(destination)
+            return
+        except Exception as error:
+            temporary.unlink(missing_ok=True)
+            if isinstance(error, ValueError): raise
+            reason = error.reason if isinstance(error, urllib.error.URLError) else error
+            retryable = (
+                phase in {'opening_connection_or_sending_request', 'reading_response'}
+                and not isinstance(error, urllib.error.HTTPError)
+                and isinstance(reason, (TimeoutError, ConnectionError, socket.gaierror,
+                                        BeforeSendConnectionError, http.client.IncompleteRead))
+            )
+            attempts.append({'attempt':attempt, 'phase':phase, 'error_type':type(error).__name__,
+                             'received_bytes':received_bytes})
+            if retryable and attempt < DOWNLOAD_ATTEMPTS:
+                # Retrying this GET only retrieves an existing result; it never creates a video.
+                time.sleep(2)
+                continue
+            trace = {'method':'GET', 'endpoint':compact_record(url), 'phase':phase, 'http_status':http_status,
+                     'timeout_seconds':DOWNLOAD_TIMEOUT_SECONDS, 'connect_timeout_seconds':DOWNLOAD_TIMEOUT_SECONDS,
+                     'elapsed_ms':round((time.monotonic()-started)*1000),
+                     'connection_route':'直连（不使用系统 HTTP 代理）', 'attempts':attempts,
+                     'error_type':type(error).__name__, 'reason':str(error), 'errno':getattr(error,'errno',None)}
+            if isinstance(error, urllib.error.HTTPError):
+                try: raw = error.read(MAX_ERROR_BYTES + 1)
+                except (OSError, http.client.HTTPException): raw = b''
+                finally: error.close()
+                trace.update(response_snapshot(raw,error.headers,error.code))
+            else:
+                trace['response_ids'] = response_snapshot(b'',response_headers,http_status)['response_ids']
+            raise SeedanceError(f'下载或保存成片失败：{error}', diagnostics=trace) from error

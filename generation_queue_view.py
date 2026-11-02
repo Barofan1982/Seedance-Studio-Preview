@@ -9,12 +9,13 @@ from generation_queue import ACTIVE, STATUS_NAMES
 from studio_widgets import button, card, label, scroll, JsonDialog
 from studio_controller import neutral_video_text
 from ui_language import choice_text, error_text
+from seedance_models import model_name
 from error_details_view import ErrorDetailsDialog
 
 
 def settings_text(settings):
     seconds = settings.get('duration')
-    return ' · '.join([settings.get('resolution',''), '自适应' if seconds == -1 else f'{seconds} 秒',
+    return ' · '.join([model_name(settings.get('generation_model') or settings.get('model', '')), settings.get('resolution',''), '自适应' if seconds == -1 else f'{seconds} 秒',
                       choice_text(settings.get('ratio','')), '有声' if settings.get('generate_audio') else '无声'])
 
 
